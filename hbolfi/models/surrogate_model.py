@@ -1,0 +1,3 @@
+
+class SurrogateModel(object):
+    pass
