@@ -73,37 +73,3 @@ class AdditiveStructureGPModel(ExactGPModel):
             self.mean.num_groups = None
             self.mean.active_dims = None
 
-
-    #gg.eval()
-    #print([p for p,v in gg.named_parameters()])
-    #print([v for p, v in gg.named_parameters() if any([o in p for o in ['noise']])])
-    #aa = QuadPolyMean(4, priors={'a_prior': , 'b_prior': 'c_prior': })
-    #print(list(aa.named_priors()))
-    #gg.restrict(0)
-
-# THIS MUST GO TO MAIN
-    # def set_init_and_priors(self, bounds):
-    #     if self.ard:
-    #         lengthscale = []
-    #         lprior_params = []
-    #         for l, u in bounds:
-    #             lengthscale.append((u - l) / 3.)
-    #             lprior_params.append(invgamma_solver((u - l) / 100., u - l))
-    #             lengthscale = torch.Tensor(lengthscale)
-    #     else:
-    #         l = np.min(self.bounds)
-    #         u = np.max(self.bounds)
-    #         lengthscale = (u - l) / 3.
-    #         lprior_params = [[invgamma_solver((u - l) / 100., u - l)]]
-    #     if 'lengthscale' not in self.init:
-    #         self.init['lengthscale'] = lengthscale
-    #         self.optim_param.append('lengthscale')
-    #     lprior_params = torch.Tensor(lprior_params)
-    #     lprior = InvGammaPrior(
-    #         alpha=lprior_params[:, 0], beta=lprior_params[:, 1])
-    #     self.priors.setdefault('lengthscale', lprior)
-    #     if 'outputscale' not in self.init:
-    #         self.optim_param.append('outputscale')
-    #     # mean 100, variance 100**2
-    #     self.priors.setdefault('outputscale', GammaPrior(1, 0.01))
-    #     self.priors.setdefault('noise', LogNormalPrior(0, 1))

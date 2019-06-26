@@ -202,15 +202,3 @@ class AcquisitionFunction(Module):
         self.rng_state = rs.generator_or_state
         x = self.transforms['from_cube'](x)
         return x
-
-    # def __getstate__(self):
-    #     state = self.__dict__
-    #     #state["rng"] = state["rng"].get_state()
-    #     return state
-    #
-    # def __setstate__(self, state):
-    #     print("OLA")
-    #     print(state)
-    #     exit(1)
-    #     #state["rng"] = torch.Generator().set_state(state["rng"])
-    #     super().__setstate__(state)
