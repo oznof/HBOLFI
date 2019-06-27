@@ -1,9 +1,10 @@
 from .truncated_normal import TruncatedNormal
 from .mixture import Mixture
-from .priors import make_prior, NormalPrior, MultivariateNormalPrior, DeltaPrior
-from .priors import GammaPrior, InvGammaPrior, HalfStudentTPrior, LogNormalPrior, DirichletPrior
-from .priors import SpikeUniformSlabPrior, SpikeNormalSlabPrior
+from .priors import make_prior, NormalPrior, MultivariateNormalPrior, HalfNormalPrior
+from .priors import GammaPrior, InvGammaPrior, StudentTPrior, HalfStudentTPrior, LogNormalPrior, DirichletPrior
+from .priors import DeltaPrior, SpikeUniformSlabPrior, SpikeNormalSlabPrior
 from .utils import normal_prob, normal_log_prob, normal_cdf, inverse_normal_cdf, invgamma_solver, SoftPlusTransform
+from .shifted_half_normal import ShiftedHalfNormal
 
 # update biject_to and transform_to registries, replacing ExpTransform with SoftPlusTransform
 from torch.distributions import biject_to, transform_to, constraints, transforms
@@ -36,9 +37,12 @@ __all__ = [
     "make_prior",
     "NormalPrior",
     "MultivariateNormalPrior",
+    "HalfNormalPrior",
+    "ShiftedHalfNormal",
     "DeltaPrior",
     "GammaPrior",
     "InvGammaPrior",
+    "StudentTPrior",
     "HalfStudentTPrior",
     "LogNormalPrior",
     "DirichletPrior",

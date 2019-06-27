@@ -27,3 +27,23 @@ class rng(object):
                 self.generator_or_state = current_rng_state
             torch.set_rng_state(self.torch_state)
 
+
+# @contextmanager
+# def rng(generator_or_state):
+#     if generator_or_state is not None:
+#         if isinstance(generator_or_state, torch.Tensor):
+#             isgenerator = False
+#             state = generator_or_state
+#         else:
+#             isgenerator = True
+#             state = generator_or_state.get_state()
+#         torch_state = torch.get_rng_state()
+#         torch.set_rng_state(state)
+#     yield
+#     if generator_or_state is not None:
+#         current_rng_state = torch.get_rng_state()
+#         if isgenerator:
+#             generator_or_state.set_state(current_rng_state)
+#         else:
+#             generator_or_state = current_rng_state
+#         torch.set_rng_state(torch_state)

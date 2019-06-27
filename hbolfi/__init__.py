@@ -1,7 +1,8 @@
 from .acquisitions import AcquisitionFunction, AdditiveAcquisitionFunction, LCB, LCBAdd
 from .bayes_opt import BayesianOptimization, BOLFI
-from .distributions import TruncatedNormal, Mixture, make_prior, NormalPrior, MultivariateNormalPrior
-from .distributions import GammaPrior, InvGammaPrior, HalfStudentTPrior, LogNormalPrior, DirichletPrior
+from .distributions import TruncatedNormal, Mixture, make_prior, NormalPrior, MultivariateNormalPrior, DeltaPrior
+from .distributions import GammaPrior, InvGammaPrior, StudentTPrior, HalfStudentTPrior, LogNormalPrior, DirichletPrior
+from .distributions import HalfNormalPrior, ShiftedHalfNormal
 from .distributions import normal_prob, normal_log_prob, normal_cdf, inverse_normal_cdf, invgamma_solver
 from .distributions import biject_to, transform_to, SoftPlusTransform
 from .inference import map_estimate, laplace, nuts, GaussianVI
@@ -40,8 +41,12 @@ __all__ = [
     "transform_to",
     "NormalPrior",
     "MultivariateNormalPrior",
+    "HalfNormalPrior",
+    "ShiftedHalfNormal",
+    "DeltaPrior",
     "GammaPrior",
     "InvGammaPrior",
+    "StudentTPrior",
     "HalfStudentTPrior",
     "LogNormalPrior",
     "DirichletPrior",

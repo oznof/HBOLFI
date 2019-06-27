@@ -70,7 +70,7 @@ class Mixture(Distribution):
     def sample(self, sample_shape=torch.Size(), generator: Optional[torch.Generator] = None) -> torch.Tensor:
         with torch.no_grad():
             mask_shape = sample_shape + self.batch_shape
-            num_samples = torch.as_tensor(mask_shape).prod().item()
+            num_samples = int(torch.as_tensor(mask_shape).prod().item())
             mask = self.weights.multinomial(num_samples, replacement=True,
                                             generator=generator).to(torch.long).reshape(mask_shape)
             if generator:  # sample methods may not support generator kwarg

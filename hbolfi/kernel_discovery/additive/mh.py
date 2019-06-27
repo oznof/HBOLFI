@@ -97,7 +97,7 @@ class MHStructureSelector(MCMCStructureSelector):
     def sample(self) -> Tuple[AdditiveStructureGPModel, float, float]:
         new_model = copy.deepcopy(self.current_model)
         new_kernel_list, proposal_logprob, reverse_logprob = self.proposal.propose(list(new_model.kernel.kernels))
-        new_model.kernel = AdditiveKernel(*new_kernel_list)
+        new_model.set_kernel(AdditiveKernel(*new_kernel_list))
         new_model.optimize()
         return new_model, proposal_logprob, reverse_logprob
 

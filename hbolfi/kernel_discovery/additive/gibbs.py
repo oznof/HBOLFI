@@ -11,6 +11,7 @@ from .mcmc import MCMCStructureSelector
 from ...models import AdditiveStructureGPModel
 from ...utils import rng
 
+
 # TODO: save models to tempdir and load them
 class GibbsStructureSelector(MCMCStructureSelector):
     """
@@ -41,10 +42,10 @@ class GibbsStructureSelector(MCMCStructureSelector):
             log_prob = torch.zeros(dim)
             llik = torch.zeros(dim)
             new_models = []
-            z0 = z[d].item()  # original assignment
+            z0 = int(z[d].item())  # original assignment
             for m in range(dim):
                 z[d] = m
-                active_dims_plus = torch.nonzero(z == m).squeeze()
+                active_dims_plus = torch.nonzero(z == m).squeeze(-1)
                 len_group = active_dims_plus.numel()
                 # avoid unnecessary model optimizations
                 if m == z0:  # original assignment
@@ -78,7 +79,7 @@ class GibbsStructureSelector(MCMCStructureSelector):
                         kernel_list[z0] = kernel_minus
                     else:  # singleton kernel_minus must be removed
                         kernel_list.pop(z0)
-                    new_model.kernel = AdditiveKernel(*kernel_list)
+                    new_model.set_kernel(AdditiveKernel(*kernel_list))
                     new_model.optimize()
                     llik_evals += 1
                     if len_group == 1:

@@ -1,26 +1,19 @@
 #!/usr/bin/env python3
-from typing import List, Dict, Optional
+from typing import List
 
 import torch
 from gpytorch.kernels import AdditiveKernel
-from gpytorch.priors import Prior
 from gpytorch.models.exact_prediction_strategies import prediction_strategy
 
 from .exact_gp import ExactGPModel
 from ...means import QuadPolyMean
-from ...kernels import ScaleRBFKernel
 
 
 class AdditiveStructureGPModel(ExactGPModel):
-    def __init__(self, kernel: AdditiveKernel, *args,  mean: Optional[QuadPolyMean] = None,
-                 priors: Optional[Dict[str, Prior]] = None, **kwargs):
+    def __init__(self, kernel: AdditiveKernel, *args, **kwargs):
         if not isinstance(kernel, AdditiveKernel):
             raise RuntimeError("AdditiveStructureGPModel can only take in an AdditiveKernel")
-        if mean is None:
-            input_dim = torch.unique(torch.cat([k.active_dims for k in kernel.kernels])).numel()
-            mean = QuadPolyMean(input_dim)
-        super().__init__(kernel, *args, mean=mean, **kwargs)
-        self.priors = priors if priors else {}
+        super().__init__(kernel, *args, **kwargs)
         self._orig_kernel = kernel
 
     def set_kernel(self, kernel: AdditiveKernel):
@@ -72,4 +65,3 @@ class AdditiveStructureGPModel(ExactGPModel):
             self.kernel = self._orig_kernel
             self.mean.num_groups = None
             self.mean.active_dims = None
-

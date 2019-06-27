@@ -7,10 +7,10 @@ import torch.nn
 from gpytorch.kernels import Kernel
 from gpytorch.priors import Prior
 from gpytorch import settings
-from gpytorch.constraints import Positive
 
 from hbolfi import settings
 from ..kernels import ScaleMaternKernel
+from ..distributions import DirichletPrior
 
 
 # based to some extent on the implementation in gpytorch.kernels.CylindricalKernel
@@ -37,43 +37,20 @@ class CylindricalKernel(Kernel):
     """
     def __init__(self, radial_base_kernel: Optional[Kernel] = None, num_angular_weights: int = 4,
                  max_radius: float = 1.0, eps: float = 1e-6,
-                 angular_weights_prior: Optional[Prior] = None,
-                 alpha_prior: Optional[Prior] = None, beta_prior: Optional[Prior] = None, **kwargs):
+                 priors: Optional[Dict[str, Prior]] = None, **kwargs):
         super().__init__(has_lengthscale=False, **kwargs)
         self.max_radius = max_radius
         self.num_angular_weights = num_angular_weights
         self.eps = eps
-        if radial_base_kernel is None:
-            lengthscale_prior = settings.lengthscale.prior('Uniform')
-            outputscale_prior = settings.outputscale.prior('Uniform')
-            radial_base_kernel = ScaleMaternKernel(nu=2.5, lengthscale_prior=lengthscale_prior,
-                                                   lengthscale_constraint=lengthscale_prior.constraint,
-                                                   outputscale_prior=outputscale_prior,
-                                                   outputscale_constraint=outputscale_prior.constraint)
-        self.radial_base_kernel = radial_base_kernel
-        if angular_weights_prior is None:
-            angular_weights_prior = settings.angular_weights.prior('Dirichlet')
+        self.radial_base_kernel = radial_base_kernel if radial_base_kernel else ScaleMaternKernel(nu=2.5)
+        angular_weights_prior = priors.get('angular_weights_prior', settings.angular_weights.prior())
+        if isinstance(angular_weights_prior, DirichletPrior):
             num_angular_weights -= 1  # because it must be in simplex
-        if alpha_prior is None:
-            alpha_prior = settings.alpha.prior('SpikeUniformSlab')
-        if beta_prior is None:
-            beta_prior = settings.beta.prior('SpikeUniformSlab')
         self.register_parameter(name="raw_angular_weights",
                                 parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, num_angular_weights)))
         self.register_parameter(name="raw_alpha", parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1)))
         self.register_parameter(name="raw_beta", parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1)))
-
-        priors = {'angular_weights_prior': angular_weights_prior, 'alpha_prior': alpha_prior, 'beta_prior': beta_prior}
-        for raw_p, _ in self.named_parameters():
-            if '.' in raw_p:
-                continue
-            p = raw_p.replace('raw_', '')
-            prior_name = p + '_prior'
-            prior = priors.get(prior_name)
-            if prior:
-                self.register_prior(prior_name, prior, lambda k=p: getattr(self, k),
-                                    lambda v, k=raw_p: self._setter_p(v, k))
-            self.register_constraint(raw_p, prior.constraint if prior else Positive())
+        self.set_priors(priors)
 
     def _getter_p(self, k: str) -> torch.Tensor:  # unconstrained -> constrained
         constraint = self._constraints.get(f"{k}_constraint")
@@ -141,4 +118,4 @@ class CylindricalKernel(Kernel):
                 prior = priors.get(name_prior, getattr(settings, name).prior())
                 self.register_prior(name_prior, prior, lambda k=name: getattr(self, k),
                                     lambda v, k=raw_name: self._setter_p(v, k))
-                self.register_constraint(raw_name, prior.constraint if prior else Positive())
+                self.register_constraint(raw_name, prior.constraint)

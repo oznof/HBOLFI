@@ -1,3 +1,4 @@
+import sys
 import os
 import csv
 import copy
@@ -24,18 +25,18 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Discrepancy function as proxy simulation model (2D+)")
     parser.add_argument('--simulator', type=str, nargs='?', default="SemiparametricQuadFormModel",
                         help="Simulator name")
-    parser.add_argument('--model_type', type=str, nargs='?', default="full", help='Type of model')
+    parser.add_argument('--model_type', type=str, nargs='?', default="mh", help='Type of model')
     parser.add_argument('--model_update', type=int, nargs='?', default=10, help="Optimize model every k acquisitions")
     parser.add_argument('--model_iters', type=int, nargs='?', default=50, help="Number of iterations per update")
     parser.add_argument('--problem', choices=['pairs', 'quads', 'halve'], default='pairs', help="type of problem")
-    parser.add_argument('--num_dims', type=int, nargs='?', default=8, help="dimension of the problem.")
+    parser.add_argument('--num_dims', type=int, nargs='?', default=4, help="dimension of the problem.")
     parser.add_argument('--path', type=str, nargs='?', default="storage/HBOLFI/", help="Results dir.")
     parser.add_argument('--acq_rule', type=str, nargs='?', default="LCB", help="Acquisition rule.")
     parser.add_argument('--acq_noise', type=float, nargs='?', default=1e-4,
                         help="Noise to be added in the acquisition step.")
     parser.add_argument('--seed', type=int, nargs='?', default=117, help="RNG seed")
     parser.add_argument('--corr', type=float, nargs='?', default=0.6, help="Correlation between variables in same block")
-    parser.add_argument('--mu_min', type=float, nargs='?', default=0.5, help="Minimum of ground truth function")
+    parser.add_argument('--mu_min', type=float, nargs='?', default=0.25, help="Minimum of ground truth function")
 
     args = parser.parse_args()
     settings = vars(args)
@@ -81,14 +82,13 @@ if __name__ == '__main__':
     elif SIMULATOR == 'QuadFormModel':
         true_model = QuadFormModel(kernel=TRUE_KERNEL, seed=SEED, **settings)
 
-
-
     true_loc = true_model.min_loc
     true_value = true_model.min_val
     assert(true_value == 0.)
     threshold = true_value  # + 2 * math.sqrt(settings['noise'])
     bolfi_gtruth = BOLFI(obj_function=true_model.observe, model=true_model,
                          search_space=SEARCH_SPACE, initial_samples=0)
+
     out = infer_distributions(bolfi=bolfi_gtruth, threshold=threshold, initial_params=true_loc,
                               num_groups=settings['num_groups'],
                               num_samples=settings['vi_num_samples'], maxiter=settings['vi_maxiter'],
@@ -101,23 +101,30 @@ if __name__ == '__main__':
     _, mvn_vi_ref_full, mvn_vi_llik_ref_full = out
 
     if DEBUG:
-        orig = lambda x: bolfi_gtruth.unnormalized_loglikelihood(threshold, x.repeat(1, settings['num_groups']))
-        lap = lambda x: mvn_lap_ref.log_prob(x.repeat(1, settings['num_groups']))
-        vi = lambda x: mvn_vi_ref.log_prob(x.repeat(1, settings['num_groups']))
-        vi_llik = lambda x: mvn_vi_llik_ref.log_prob(x.repeat(1, settings['num_groups']))
-
         from hbolfi.utils import plot_contour
-        ax = plot_contour(orig, bounds=(-2.9, 2.9), colors='r')
-        plot_contour(lap, bounds=(-2.9, 2.9), colors='g', ax=ax)
-        plot_contour(vi, bounds=(-2.9, 2.9), colors='k', ax=ax)
-        plot_contour(vi_llik, bounds=(-2.9, 2.9), colors='b', ax=ax)
         import matplotlib.pyplot as plt
+        import matplotlib.cm as cm
+        import numpy as np
+        orig = lambda x: true_model.observe_noiseless(x.repeat(1, settings['num_groups']))
+        ax = plot_contour(orig, fill=True,
+                          level_fn=lambda vmin, vmax: np.logspace(np.log10(vmin), np.log10(vmax), 50))
+        plt.show()
+        orig = lambda x: bolfi_gtruth.unnormalized_loglikelihood(threshold, x.repeat(1, settings['num_groups'])).exp()
+        lap = lambda x: mvn_lap_ref.log_prob(x.repeat(1, settings['num_groups'])).exp()
+        vi = lambda x: mvn_vi_ref.log_prob(x.repeat(1, settings['num_groups'])).exp()
+        vi_llik = lambda x: mvn_vi_llik_ref.log_prob(x.repeat(1, settings['num_groups'])).exp()
+        # ax = plot_contour(orig, minmax_scale=True, fill=True, cmap=cm.gray, levels=np.linspace(0, 1, 50))
+        ax = plot_contour(orig, minmax_scale=True, colors='k', linestyles='dashed', linewidths=2)
+        plot_contour(lap, colors='r', ax=ax, linewidths=2)
+        plot_contour(vi, colors='g', ax=ax, linewidths=2)
+        plot_contour(vi_llik, colors='b', ax=ax, linewidths=2)
         plt.show()
         print(mvn_lap_ref.covariance_matrix.diag())
         print("==========")
         print(mvn_vi_ref.covariance_matrix.diag())
         print("==========")
         print(mvn_vi_llik_ref.covariance_matrix.diag())
+        sys.exit(1)
 
     gtruth_file = os.path.join(EXP_PATH, f"{EXP_NAME}_gtruth.pkl")
     if os.path.exists(gtruth_file):
@@ -146,14 +153,15 @@ if __name__ == '__main__':
 
     print("Starting BOLFI")
     # Approximation
-    mean_function = copy.deepcopy(true_model.mean_function)
+
     if SIMULATOR == 'SemiparametricQuadFormModel':
-        init = {'lengthscale': settings['true_lengthscale'], 'outputscale': settings['true_outputscale'],
-                'noise': settings['true_noise']}
-    if MODEL_TYPE in ['mh', 'gibbs']:
-        gpm = AdditiveStructureGPModel(kernel=INITIAL_KERNEL, mean=mean_function, optim_param=(), init=init)
+        mean_function = copy.deepcopy(true_model.mean_function)
     else:
-        gpm = ExactGPModel(kernel=INITIAL_KERNEL, mean=mean_function, optim_param=(), init=init)
+        mean_function = None  # use the default mean (QuadPolyMean) with default priors
+    if MODEL_TYPE in ['mh', 'gibbs']:
+        gpm = AdditiveStructureGPModel(kernel=INITIAL_KERNEL, mean=mean_function)
+    else:
+        gpm = ExactGPModel(kernel=INITIAL_KERNEL, mean=mean_function)
     bolfi = BOLFI(obj_function=true_model.observe, model=gpm, search_space=SEARCH_SPACE,
                   acquisition=ACQUISITION, seed=SEED)
 
@@ -182,8 +190,8 @@ if __name__ == '__main__':
                 out = infer_distributions(bolfi=bolfi, threshold=exp_val_min, initial_params=exp_loc_min,
                                           num_groups=settings['num_groups'],
                                           num_samples=settings['vi_num_samples'], maxiter=settings['vi_maxiter'],
-                                          with_vi=True, with_vi_no_prior=True, seed=SEED, vi_mode='oracle', verbose=True,
-                                          name='apprx')
+                                          with_vi=True, with_vi_no_prior=True, seed=SEED, vi_mode='oracle',
+                                          verbose=True, name='apprx')
                 mvn_lap, mvn_vi, mvn_vi_llik = out
                 kl_lap = kl_divergence(mvn_lap_ref, mvn_lap).item()
                 kl_vi = kl_divergence(mvn_vi_ref, mvn_vi).item()

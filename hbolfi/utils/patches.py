@@ -5,7 +5,6 @@ from gpytorch.constraints import Interval
 
 
 # gpytorch.module.Module.sample_from_prior does not take into consideration the sample shape
-# fix this by including closure().shape
 def sample_from_prior(self, prior_name):
     (*submodule_names, prior_name) = prior_name.split('.')
     module = self
@@ -17,7 +16,12 @@ def sample_from_prior(self, prior_name):
     prior, closure, setting_closure = module._priors[prior_name]
     if setting_closure is None:
         raise RuntimeError("Must provide inverse transform to be able to sample from prior.")
-    setting_closure(prior.sample(closure().shape))
+    sample_shape = closure().shape
+    if prior.event_shape:
+        sample_shape = sample_shape[:-len(prior.event_shape)]
+    if prior.batch_shape:
+        sample_shape = sample_shape[:-len(prior.batch_shape)]
+    setting_closure(prior.sample(sample_shape))
 
 
 def register_constraint(self, param_name, constraint, replace=True):

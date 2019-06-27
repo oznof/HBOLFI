@@ -4,15 +4,14 @@ from time import time
 
 import numpy as np
 import torch
-from torch.distributions import Uniform
 import gpytorch
 from gpytorch.kernels import AdditiveKernel
 
 from hbolfi import ScaleRBFKernel, ScaleMaternKernel, CylindricalKernel
 from hbolfi import LCB, LCBAdd
 from hbolfi import MHStructureSelector, GibbsStructureSelector
-from hbolfi import HalfStudentTPrior, InvGammaPrior, invgamma_solver, LogNormalPrior,
-from hbolfi import make_prior
+from hbolfi import settings as global_settings
+
 
 ACQUISITION_RULES = {"LCB": LCB, "LCBAdd": LCBAdd}
 MODEL_MODIFIERS = {"mh": MHStructureSelector, "gibbs": GibbsStructureSelector}
@@ -21,13 +20,11 @@ KERNEL_TYPES = {'ScaleRBFKernel': ScaleRBFKernel,
                 'CylindricalKernel': CylindricalKernel}
 DEFAULT_KERNEL_TYPE = 'ScaleRBFKernel'
 
-torch.set_default_dtype(torch.float64)
-
 
 def prepare_experiment(settings, make_dirs=True, scale_noise=False):
+    torch.set_default_dtype(torch.float64)
     other_settings = dict(ard=False, num_acqs=500, stats_update=10, save_model_update=50,
-                          noise=1e-2, true_lengthscale=1, true_outputscale=1,
-                          min_bound=-1, max_bound=1)
+                          noise=1e-2, min_bound=-1, max_bound=1)
     settings.update(other_settings)
     vi_settings = dict(vi_num_samples=5000, vi_maxiter=1000)
     nuts_settings = {'nuts_options': dict(num_samples=5000, num_chains=4, warmup_steps=250, num_thinning=2)}
@@ -50,21 +47,21 @@ def prepare_experiment(settings, make_dirs=True, scale_noise=False):
     bounds = torch.stack((lower_bound, upper_bound))
     settings['search_space'] = {'dim': num_dims, 'bounds': bounds}
 
-    # Define ground truth partition and  model parameters (e.g. kernel)
+    # Define ground truth partition and model parameters (e.g. kernel)
     true_partition = np.arange(num_groups * group_dims).reshape((num_groups, group_dims))
     true_partition = [list(pi) for pi in true_partition]
     settings['true_partition'] = true_partition
-    if settings['simulator_type'] == 'SemiparametricQuadFormModel':
-        true_kernel = []
+    if settings['simulator'] == 'SemiparametricQuadFormModel':
+        # In this simulator, we do not optimize the hyperparameters, we set the same hypers as those in the
+        # ground truth model, all priors are instances of DeltaPrior
+        global_settings.fix_all_hyperparameters._state = True
+        global_settings.noise.set('Delta', initial_value=torch.as_tensor(settings['noise']))
         settings.setdefault('true_kernel_type', DEFAULT_KERNEL_TYPE)
         true_kernel_cls = KERNEL_TYPES[settings['true_kernel_type']]
-        settings['true_kernel_type'] =
-        for pi in true_partition:
-            k = true_kernel_cls(active_dims=pi, ard_num_dims=len(pi) if settings['ard'] else None)
-            k.lengthscale = settings['true_lengthscale']
-            k.outputscale = settings['true_outputscale']
-            true_kernel.append(k)
+        true_kernel = [true_kernel_cls(active_dims=pi, ard_num_dims=len(pi) if settings['ard'] else None) for pi in
+                       true_partition]
         true_kernel = AdditiveKernel(*true_kernel)
+        true_kernel.set_priors()
         settings['true_kernel'] = true_kernel
 
     # Experiment description
@@ -76,38 +73,34 @@ def prepare_experiment(settings, make_dirs=True, scale_noise=False):
     model_type = settings['model_type']
 
     if model_type == 'oracle':
-        settings['kernel_type'] = settings['true_kernel_type']
-        partition = true_partition
-        initial_kernel = copy.deepcopy(true_kernel)
+        if settings['simulator'] == 'SemiparametricQuadFormModel':
+            settings['kernel_type'] = settings['true_kernel_type']
+            partition = true_partition
+            initial_kernel = copy.deepcopy(settings['true_kernel'])
+        else:
+            raise NotImplementedError()
     else:
         settings.setdefault('kernel_type', DEFAULT_KERNEL_TYPE)
         kernel_cls = KERNEL_TYPES[settings['kernel_type']]
         if model_type not in ['indep', 'indepscaled']:
             partition = [list(range(num_dims))]
             initial_kernel = kernel_cls(active_dims=range(num_dims), ard_num_dims=num_dims if settings['ard'] else None)
-            initial_kernel.lengthscale = settings['lengthscale']
-            if model_type == 'fullscaled':
-                settings['outputscale'] = settings['outputscale'] * num_groups
-            initial_kernel.outputscale = settings['outputscale']
+            if model_type == 'fullscaled':  # this only makes sense in the SemiparametricQuadFormModel
+                outputscale_value = global_settings.outputscale.initial_value
+                global_settings.outputscale.set(prior='Delta', initial_value=outputscale_value * num_groups)
             if model_type in ['mh', 'gibbs']:
                 initial_kernel = gpytorch.kernels.AdditiveKernel(initial_kernel)
         else:  # indep and indepscaled
             partition = [[v] for v in range(num_dims)]
-            if model_type == 'indepscaled':
-                settings['outputscale'] = settings['outputscale'] / group_dims
+            if model_type == 'indepscaled':  # this only makes sense in the SemiparametricQuadFormModel
+                outputscale_value = global_settings.outputscale.initial_value
+                global_settings.outputscale.set(prior='Delta', initial_value=outputscale_value / group_dims)
             if not settings['ard']:
                 initial_kernel = gpytorch.kernels.AdditiveStructureKernel(kernel_cls(), num_dims=num_dims)
-                initial_kernel.base_kernel.lengthscale = settings['lengthscale']
-                initial_kernel.base_kernel.outputscale = settings['outputscale']
             else:  # indep and indepscaled (non-shared parameters)
-                initial_kernel = []
-                for dd in range(num_dims):
-                    kernel = kernel_cls(active_dims=[dd])
-                    kernel.lengthscale = settings['lengthscale']
-                    kernel.outputscale = settings['outputscale']
-                    initial_kernel.append(kernel)
-                initial_kernel = gpytorch.kernels.AdditiveKernel(*initial_kernel)
-
+                initial_kernel = gpytorch.kernels.AdditiveKernel(*[kernel_cls(active_dims=[dd])
+                                                                   for dd in range(num_dims)])
+    initial_kernel.set_priors()
     settings['initial_partition'] = partition
     settings['initial_kernel'] = initial_kernel
 
@@ -131,9 +124,6 @@ def prepare_experiment(settings, make_dirs=True, scale_noise=False):
         if not os.path.exists(stats_path):
             os.makedirs(stats_path)
     return settings
-
-
-
 
 
 def infer_distributions(bolfi, threshold, initial_params=None, num_groups=None, num_samples=5000, maxiter=1000,
@@ -164,9 +154,9 @@ def infer_distributions(bolfi, threshold, initial_params=None, num_groups=None, 
             print(f"Computing {name} distribution with {vi_mode}GaussianVI..", end='')
         start_time = time()
         mvn_vi_llik = bolfi.infer(threshold, method='gaussian_vi_' + vi_mode,
-                                         initial_params=mvn_lap.mean, with_prior=False,
-                                         num_groups=num_groups, n_inits=1,
-                                         num_samples=num_samples, maxiter=maxiter, seed=seed)
+                                  initial_params=mvn_lap.mean, with_prior=False,
+                                  num_groups=num_groups, n_inits=1,
+                                  num_samples=num_samples, maxiter=maxiter, seed=seed)
         out.append(mvn_vi_llik)
         if verbose:
             print(f"Done.  time={time() - start_time:.3f}s.")

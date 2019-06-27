@@ -3,7 +3,8 @@ import copy
 import torch
 import gpytorch
 
-from hbolfi import AdditiveStructureGPModel, LCB, QuadPolyMean
+from hbolfi import AdditiveStructureGPModel, LCB, QuadPolyMean, settings, DeltaPrior
+from hbolfi.utils import rng
 
 
 class QuadFormModel:
@@ -20,20 +21,21 @@ class QuadFormModel:
         self.min_loc = mu_min * torch.ones(num_dims) if min_loc is None else min_loc
         self.search_space = search_space
         if mean_function is None:
-            self.mean_function = QuadPolyMean(self.num_dims)
-            self.mean_function.initialize(a=self._a_weights, b=0, c=0)
+            a_prior = DeltaPrior(self._a_weights, initial_value=self._a_weights)
+            b_prior = settings.quadpoly_b.prior('Delta')
+            c_prior = settings.quadpoly_c.prior('Delta')
+            mean_priors = {'quadpoly_a_prior': a_prior, 'quadpoly_b_prior': b_prior, 'quadpoly_c_prior': c_prior}
+            self.mean_function = QuadPolyMean(self.num_dims, priors=mean_priors)
             for p in self.mean_function.parameters():  # freeze parameters
                 p.requires_grad = False
         self.seed = seed
         self.rng_obs = torch.Generator().manual_seed(self.seed).get_state()  # for generating noisy observations
-        self.likelihood = gpytorch.likelihoods.GaussianLikelihood()
-        self.likelihood.noise = kwargs.get('noise', 1e-2)
+        noise = torch.as_tensor(kwargs.get('noise', 1e-2))
+        noise_prior = DeltaPrior(noise, initial_value=noise)
+        self.likelihood = gpytorch.likelihoods.GaussianLikelihood(noise_prior=noise_prior,
+                                                                  noise_constraint=noise_prior.constraint)
         for p in self.likelihood.parameters():
             p.requires_grad = False
-        self.lengthscale = torch.zeros(self.num_dims)
-        for k in self.kernel.kernels:
-            self.lengthscale[k.active_dims] = k.lengthscale.detach().clone()
-        self.outputscale = self.kernel.kernels[0].outputscale.detach().clone()
         try:
             # during init, this might not work for classes that overload the observe_noiseless method
             self.min_val = self.observe_noiseless(self.min_loc)
@@ -65,12 +67,12 @@ class QuadFormModel:
         return gpytorch.distributions.MultivariateNormal(mean, covar)
 
     def observe(self, x: torch.Tensor):
-        rng_obs = torch.Generator().set_state(self.rng_obs)
-        x = x.view(-1, self.num_dims)
-        mvn = self.likelihood(self(x))
-        base_samples = torch.randn(x.size(0), generator=rng_obs)
-        y = mvn.sample(base_samples=base_samples)
-        self.rng_obs = rng_obs.get_state()
+        with rng(self.rng_obs) as rs:
+            x = x.view(-1, self.num_dims)
+            mvn = self.likelihood(self(x))
+            base_samples = torch.randn(x.size(0))
+            y = mvn.sample(base_samples=base_samples)
+        self.rng_obs = rs.generator_or_state
         return y
 
     def __getstate__(self):
@@ -82,8 +84,8 @@ class QuadFormModel:
 
 
 class SemiparametricQuadFormModel(QuadFormModel):
-    def __init__(self, kernel, num_dims, corr, search_space, mu_min=0.5,
-                 radii=tuple([0.01, 0.1, 0.5, 1]), num_s=200,
+    def __init__(self, kernel, num_dims, corr, search_space, mu_min=0.25,
+                 radii=tuple([0.01, 0.1, 0.2, 0.5]), num_s=200,
                  mean_function=None, seed=117, copy_kernel=True,
                  **kwargs):
         # settings for generating data for the nonparametric part
@@ -99,13 +101,12 @@ class SemiparametricQuadFormModel(QuadFormModel):
 
     def _build_model(self):
         xmin = torch.full((self.num_dims,), float('inf'))
+        noise = torch.tensor(1e-10)
+        noise_prior = DeltaPrior(noise, initial_value=noise)
+        likelihood = gpytorch.likelihoods.GaussianLikelihood(noise_prior=noise_prior,
+                                                             noise_constraint=noise_prior.constraint)
         gpm = AdditiveStructureGPModel(kernel=self.kernel, train_inputs=None, train_targets=None,
-                                       likelihood=gpytorch.likelihoods.GaussianLikelihood(
-                                           noise_constraint=gpytorch.constraints.GreaterThan(1e-10)),
-                                       mean=self.mean_function, optim_param=(),
-                                       init={'lengthscale': self.lengthscale, 'outputscale': self.outputscale,
-                                             'noise': 1e-10})
-        gpm.likelihood.noise = 1e-10
+                                       likelihood=likelihood, mean=self.mean_function)
         self.model = gpm
         for p in gpm.parameters():  # freeze all parameters
             p.requires_grad = False
@@ -131,23 +132,23 @@ class SemiparametricQuadFormModel(QuadFormModel):
 
     def _sample_quadform_data(self):
         # sample locations
-        rng_data = torch.Generator().set_state(self.rng_data)
-        x = torch.zeros((1 + len(self.radii) * self.num_s, self.num_dims))
-        x[0] = self.min_loc
-        for i, r in enumerate(self.radii):
-            x_aux = torch.zeros(self.num_s, self.num_dims)
-            for pid, pi in enumerate(self.partition):
-                x_aux[:, pi] = torch.randn(self.num_s, len(pi), generator=rng_data)
-                corr_group = self.C[(pi.unsqueeze(1), pi.unsqueeze(0))]
-                x_aux[:, pi] = r * x_aux[:, pi] / torch.norm(x_aux[:, pi], dim=1).unsqueeze(1)  # sphere
-                x_aux[:, pi] = x_aux[:, pi] @ torch.cholesky(corr_group, upper=True)
-                #if i < 2:
-                #    x_aux[:, pi] *= torch.rand(self.num_s, 1, generator=self.rng_data).pow(1./len(pi))  # ball
-            x[1 + i * self.num_s:1 + (i + 1) * self.num_s] = x_aux + self.min_loc
-        assert(self._within_bounds(x, slack=0.))
-        # get noiseless observations
-        f = super().observe_noiseless(x)
-        self.rng_data = rng_data.get_state()
+        with rng(self.rng_data) as rs:
+            x = torch.zeros((1 + len(self.radii) * self.num_s, self.num_dims))
+            x[0] = self.min_loc
+            for i, r in enumerate(self.radii):
+                x_aux = torch.zeros(self.num_s, self.num_dims)
+                for pid, pi in enumerate(self.partition):
+                    x_aux[:, pi] = torch.randn(self.num_s, len(pi))
+                    corr_group = self.C[(pi.unsqueeze(1), pi.unsqueeze(0))]
+                    x_aux[:, pi] = r * x_aux[:, pi] / torch.norm(x_aux[:, pi], dim=1).unsqueeze(1)  # sphere
+                    x_aux[:, pi] = x_aux[:, pi] @ torch.cholesky(corr_group, upper=True)
+                    #if i < 2:
+                    #    x_aux[:, pi] *= torch.rand(self.num_s, 1, generator=self.rng_data).pow(1./len(pi))  # ball
+                x[1 + i * self.num_s:1 + (i + 1) * self.num_s] = x_aux + self.min_loc
+            assert(self._within_bounds(x, slack=0.))
+            # get noiseless observations
+            f = super().observe_noiseless(x)
+        self.rng_data = rs.generator_or_state
         return x, f
 
     def observe_noiseless(self, x: torch.Tensor):
@@ -165,3 +166,4 @@ class SemiparametricQuadFormModel(QuadFormModel):
             if item == "model":
                 raise KeyError
             return getattr(self.model, item)
+

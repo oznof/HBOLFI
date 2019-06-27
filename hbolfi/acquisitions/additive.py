@@ -6,7 +6,7 @@ from torch.distributions import AffineTransform, biject_to, constraints
 from .acquisition_base import AcquisitionFunction
 from ..models import AdditiveStructureGPModel
 
-# TODO:
+
 # for now, this only works if the search_space is a hypercube specified by 'bounds'
 class AdditiveAcquisitionFunction(AcquisitionFunction):
     def __init__(self, model: AdditiveStructureGPModel, *args, **kwargs):

@@ -1,92 +1,96 @@
+from typing import Optional, Union
+
 import torch
 from gpytorch.settings import _feature_flag, _value_context
+from gpytorch.priors import Prior
 
 from torch.distributions import Uniform
 
-from .distributions import InvGammaPrior, HalfStudentTPrior, DirichletPrior, SpikeUniformSlabPrior
-from .distributions import make_prior, DeltaPrior
+from .distributions import InvGammaPrior, StudentTPrior, HalfStudentTPrior, DirichletPrior, SpikeUniformSlabPrior
+from .distributions import make_prior, DeltaPrior, ShiftedHalfNormal
+
+torch.set_default_dtype(torch.float64)
 
 
 class _prior_context(object):
     _prior_registry = {}
     _prior = None
-    _initial_value = None
+    initial_value = None
 
     @classmethod
     def default_prior_registry(cls):
-        default_priors = {'Delta': DeltaPrior(cls._initial_value, initial_value=cls._initial_value)}
+        default_priors = {'Delta': DeltaPrior(cls.initial_value, initial_value=cls.initial_value)}
         cls._prior_registry.update(default_priors)
         cls._prior = cls._prior_registry['Delta']
 
     @classmethod
-    def prior(cls, name=None, reload_default=False):
+    def prior(cls, name: Optional[str] = None, reload_default: bool = False) -> Prior:
         if not cls._prior_registry or reload_default:
             cls.default_prior_registry()
         return cls._prior if name is None else cls._prior_registry[name]
 
     @classmethod
-    def initial_value(cls):
-        return cls._initial_value
-
-    @classmethod
-    def switch_default_prior(cls, name):
+    def switch_default_prior(cls, name: str):
         if not cls._prior_registry:
             cls.default_prior_registry()
         cls._prior = cls._prior_registry[name]
 
     @classmethod
-    def set(cls, prior=None, initial_value=None, sample_value=False, force=False):
-        prior = cls._prior_registry[prior] if isinstance(prior, str) else prior
+    def set(cls, prior: Optional[Union[str, Prior]] = None, initial_value: Optional[torch.Tensor] = None):
+        reload_default = False
+        if initial_value is not None:
+            cls.initial_value = initial_value
+            reload_default = True
+        if isinstance(prior, str):
+            prior = cls.prior(prior, reload_default=reload_default)
+        elif isinstance(prior, Prior):
+            prior.constraint.initial_value = getattr(prior.constraint, 'initial_value', cls.initial_value)
+        else:
+            raise RuntimeError("Invalid prior.")
+        if isinstance(prior, DeltaPrior):
+            prior.v = prior.constraint.initial_value
         cls._prior = prior
-        if prior:
-            initial_value = prior.constraint.__dict__.get('initial_value', initial_value)
-        if initial_value is not None or force:
-            cls._initial_value = initial_value
-        cls._sample_value._state = sample_value
 
     @classmethod
     def get(cls):
-        return cls._prior, cls._initial_value, cls._sample_value.on()
+        return cls._prior, cls.initial_value
 
-    def __init__(self, prior=None, initial_value=None, sample_value=False, replace=False):
+    def __init__(self, prior: Optional[Union[str, Prior]] = None, initial_value: Optional[torch.Tensor] = None):
         self._orig = self.__class__.get()
-        if prior:
-            prior = self.prior(prior) if isinstance(prior, str) else prior
-            initial_value = prior.constraint.__dict__.get('initial_value', initial_value)
-            prior.constraint.initial_value = initial_value
-        self._instance = (prior, initial_value, sample_value)
-        self._replace = replace
+        self._instance = (prior, initial_value)
 
     def __enter__(self):
-        self.__class__.set(*self._instance, force=self._replace)
+        self.__class__.set(*self._instance)
 
     def __exit__(self, *args):
-        if not self._replace:
-            self.__class__.set(*self._orig, force=True)
-        self._replace = False
+        self.__class__.set(*self._orig)
         return False
 
 
 class fix_all_hyperparameters(_feature_flag):
     _state = False
 
+
 class initialize_before_optimization(_feature_flag):
     _state = True
+
 
 class noise(_prior_context):
     _prior_registry = {}
     _prior = None
-    _initial_value = torch.ones(1)
+    initial_value = torch.tensor(1.)
 
     @classmethod
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'Uniform': make_prior(Uniform(torch.Tensor([1e-4]), torch.Tensor([1e4])),
-                                                    initial_value=cls._initial_value)}
+            default_priors = {'Uniform': make_prior(Uniform(torch.tensor(1e-6), torch.tensor(1e4)),
+                                                    initial_value=cls.initial_value),
+                              'ShiftedHalfNormalPrior': make_prior(ShiftedHalfNormal(torch.tensor(1e-6),
+                                                                                     torch.tensor(1.)),
+                                                                   initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
-            cls._prior = cls._prior_registry['Uniform']
-
+            cls._prior = cls._prior_registry['ShiftedHalfNormalPrior']
 
 
 # this was found using invgamma_solver, method='normal', l=1/100, u=2
@@ -98,15 +102,15 @@ class invgamma_parameters(_value_context):
 class lengthscale(_prior_context):
     _prior_registry = {}
     _prior = None
-    _initial_value = torch.ones(1)
+    initial_value = torch.tensor(1.)
 
     @classmethod
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'InvGamma': InvGammaPrior(*invgamma_parameters.value(), initial_value=cls._initial_value),
-                              'Uniform':  make_prior(Uniform(torch.Tensor([0.01]), torch.Tensor([2.])),
-                                                  initial_value=cls._initial_value)}
+            default_priors = {'InvGamma': InvGammaPrior(*invgamma_parameters.value(), initial_value=cls.initial_value),
+                              'Uniform':  make_prior(Uniform(torch.tensor(0.01), torch.tensor(2.)),
+                                                  initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
             cls._prior = cls._prior_registry['InvGamma']
 
@@ -114,30 +118,31 @@ class lengthscale(_prior_context):
 class outputscale(_prior_context):
     _prior_registry = {}
     _prior = None
-    _initial_value = torch.ones(1)
+    initial_value = torch.tensor(1.)
 
     @classmethod
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'HalfStudentT': HalfStudentTPrior(scale=torch.ones(1), df=torch.Tensor([3.]),
-                                                                initial_value=cls._initial_value),
-                              'Uniform': make_prior(Uniform(torch.Tensor([6e-6]), torch.Tensor([1e5])),
-                                                    initial_value=cls._initial_value)}
+            default_priors = {'HalfStudentT': HalfStudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
+                                                                initial_value=cls.initial_value),
+                              'Uniform': make_prior(Uniform(torch.tensor(6e-6), torch.tensor(1e5)),
+                                                    initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
             cls._prior = cls._prior_registry['HalfStudentT']
-
 
 class angular_weights(_prior_context):
     _prior_registry = {}
     _prior = None
-    _initial_value = torch.ones(4) / 4
+    initial_value = torch.ones(4) / 4
 
     @classmethod
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'Dirichlet': DirichletPrior(torch.ones(4), initial_value=cls._initial_value)}
+            default_priors = {'Dirichlet': DirichletPrior(torch.ones(4), initial_value=cls.initial_value),
+                              'HalfStudentT': HalfStudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
+                                                                initial_value=torch.tensor(1.))}
             cls._prior_registry.update(default_priors)
             cls._prior = cls._prior_registry['Dirichlet']
 
@@ -145,16 +150,16 @@ class angular_weights(_prior_context):
 class alpha(_prior_context):
     _prior_registry = {}
     _prior = None
-    _initial_value = torch.ones(1)
+    initial_value = torch.tensor(1.)
 
     @classmethod
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'SpikeUniformSlab': SpikeUniformSlabPrior(mean=torch.ones(1), low=torch.Tensor([0.5]),
-                                                                        high=torch.ones(1),
-                                                                        spike_scale=torch.Tensor([0.01]),
-                                                                        initial_value=cls._initial_value)}
+            default_priors = {'SpikeUniformSlab': SpikeUniformSlabPrior(mean=torch.tensor(1.), low=torch.tensor(0.5),
+                                                                        high=torch.tensor(1.),
+                                                                        spike_scale=torch.tensor(0.01),
+                                                                        initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
             cls._prior = cls._prior_registry['SpikeUniformSlab']
 
@@ -162,16 +167,60 @@ class alpha(_prior_context):
 class beta(_prior_context):
     _prior_registry = {}
     _prior = None
-    _initial_value = torch.ones(1)
+    initial_value = torch.tensor(1.)
 
     @classmethod
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'SpikeUniformSlab': SpikeUniformSlabPrior(mean=torch.ones(1), low=torch.ones(1),
-                                                                        high=torch.Tensor([2.]),
-                                                                        spike_scale=torch.Tensor([0.01]),
-                                                                        initial_value=torch.ones(1))}
+            default_priors = {'SpikeUniformSlab': SpikeUniformSlabPrior(mean=torch.tensor(1.), low=torch.tensor(1.),
+                                                                        high=torch.tensor(2.),
+                                                                        spike_scale=torch.tensor(0.01),
+                                                                        initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
             cls._prior = cls._prior_registry['SpikeUniformSlab']
 
+
+class quadpoly_a(_prior_context):
+    _prior_registry = {}
+    _prior = None
+    initial_value = torch.tensor(1.)
+
+    @classmethod
+    def default_prior_registry(cls):
+        super().default_prior_registry()
+        if fix_all_hyperparameters.off():
+            default_priors = {'HalfStudentT': HalfStudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
+                                                                initial_value=cls.initial_value)}
+            cls._prior_registry.update(default_priors)
+            cls._prior = cls._prior_registry['HalfStudentT']
+
+
+class quadpoly_b(_prior_context):
+    _prior_registry = {}
+    _prior = None
+    initial_value = torch.tensor(0.)
+
+    @classmethod
+    def default_prior_registry(cls):
+        super().default_prior_registry()
+        if fix_all_hyperparameters.off():
+            default_priors = {'StudentT': StudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
+                                                        initial_value=cls.initial_value)}
+            cls._prior_registry.update(default_priors)
+            cls._prior = cls._prior_registry['StudentT']
+
+
+class quadpoly_c(_prior_context):
+    _prior_registry = {}
+    _prior = None
+    initial_value = torch.tensor(0.)
+
+    @classmethod
+    def default_prior_registry(cls):
+        super().default_prior_registry()
+        if fix_all_hyperparameters.off():
+            default_priors = {'StudentT': StudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
+                                                        initial_value=cls.initial_value)}
+            cls._prior_registry.update(default_priors)
+            cls._prior = cls._prior_registry['StudentT']

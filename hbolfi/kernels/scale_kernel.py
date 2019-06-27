@@ -37,7 +37,7 @@ def make_scaled(cls: Kernel):
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor,
                 last_dim_is_batch: bool = False, diag: bool = False, **params) -> torch.Tensor:
-        orig_output = super().forward(x1, x2, diag=diag, last_dim_is_batch=last_dim_is_batch, **params)
+        orig_output = cls.forward(self, x1, x2, diag=diag, last_dim_is_batch=last_dim_is_batch, **params)
         outputscales = self.outputscale
         if last_dim_is_batch:
             outputscales = outputscales.unsqueeze(-1)
@@ -48,16 +48,16 @@ def make_scaled(cls: Kernel):
             outputscales = outputscales.view(*outputscales.shape, 1, 1)
             return orig_output.mul(outputscales)
 
-    def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True):
+    def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True) -> Kernel:
         if priors is None:
             priors = {}
         if with_default or 'outputscale_prior' in priors:
             prior = priors.get('outputscale_prior', settings.outputscale.prior())
             self.register_prior('outputscale_prior', prior, lambda: self.outputscale,
                                 lambda v: self._set_outputscale(v))
-
             self.register_constraint('raw_outputscale', prior.constraint)
         cls.set_priors(self, priors=priors, with_default=with_default)
+        return self
 
     def extra_repr(self) -> str:
         return f"lengthscale: {self.lengthscale.detach().numpy()}\n" \

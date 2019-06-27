@@ -1,10 +1,11 @@
 from typing import Type, Sequence, Optional, Union
+import copy
 from numbers import Number
 
 import torch
-from torch.distributions import biject_to, TransformedDistribution
+from torch.distributions import biject_to, Distribution, TransformedDistribution
 from torch.nn import Module
-from torch.distributions import Distribution, Uniform, Normal, MultivariateNormal, Gamma, LogNormal, Dirichlet
+from torch.distributions import StudentT, Uniform, Normal, MultivariateNormal, HalfNormal, Gamma, LogNormal, Dirichlet
 from pyro.distributions import Delta
 from gpytorch.priors import Prior
 
@@ -38,7 +39,7 @@ class Constraint(Module):
         return self._inv_transform(tensor)
 
     def check_raw(self, tensor):
-        return self._support.check(self._transform(tensor))
+        return self._support.check(self._transform(tensor)).all()
 
     def __repr__(self):
         return self._support.__repr__()
@@ -46,12 +47,9 @@ class Constraint(Module):
 
 def make_prior(cls_or_inst: Union[Type[Distribution], Distribution],
                initial_value: Optional[Union[torch.Tensor, Number]] = None) -> Prior:
-    params = cls_or_inst.__init__.__code__.co_varnames[:cls_or_inst.__init__.__code__.co_argcount]
-    params = [p for p in params if p not in ('self', 'validate_args')]
-    #params = [('_'+p if p == 'validate_args' else p) for p in params]
     isinst = isinstance(cls_or_inst, torch.distributions.Distribution)
     cls = cls_or_inst.__class__ if isinst else cls_or_inst
-    support = cls_or_inst.support
+    support = copy.deepcopy(cls_or_inst.support)
 
     def __init__(self, *args, initial_value=None, transform=None, **kwargs):
         Module.__init__(self)
@@ -59,18 +57,15 @@ def make_prior(cls_or_inst: Union[Type[Distribution], Distribution],
         # _bufferize_attributes(self, params)
         self._transform = transform
         # the following allows to define gpytorch.constraints only using the support of the chosen prior
-        cls_prior.constraint = Constraint(support=support, initial_value=initial_value)
+        self.constraint = Constraint(support=support, initial_value=initial_value)
 
     cls_prior = type(f"{cls.__name__}Prior", (Prior, cls), {'__init__': __init__})
-    if isinst:
+    cls_prior.support = support
+    if isinst:  # create instance
+        params = cls_or_inst.__init__.__code__.co_varnames[:cls_or_inst.__init__.__code__.co_argcount]
+        params = [p for p in params if p not in ('self', 'validate_args')]
+        # params = [('_'+p if p == 'validate_args' else p) for p in params]
         cls_or_inst_prior = cls_prior(initial_value=initial_value, **{p: getattr(cls_or_inst, p) for p in params})
-        # support is defined at class level, need to override by that of instance
-        # not a problem with multiple instances, because each prior will be of a different class despite
-        # the class in the argument being the same,
-        # i.e. supports are not shared among different instances of the same class.
-        # Uniform instances are potential use cases, because their support is dependent on the specification
-        # of params, otherwise it is better to provide a class
-        cls_prior.support = support
     else:
         cls_or_inst_prior = cls_prior
     return cls_or_inst_prior
@@ -78,8 +73,10 @@ def make_prior(cls_or_inst: Union[Type[Distribution], Distribution],
 
 NormalPrior = make_prior(Normal)
 MultivariateNormalPrior = make_prior(MultivariateNormal)
+HalfNormalPrior = make_prior(HalfNormal)
 GammaPrior = make_prior(Gamma)
 InvGammaPrior = make_prior(InvGamma)
+StudentTPrior = make_prior(StudentT)
 HalfStudentTPrior = make_prior(HalfStudentT)
 LogNormalPrior = make_prior(LogNormal)
 DirichletPrior = make_prior(Dirichlet)
