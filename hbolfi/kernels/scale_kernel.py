@@ -1,31 +1,22 @@
 from typing import Dict, Optional
 
 import torch
+from torch.nn import Module
 import gpytorch
 from gpytorch.priors import Prior
 from gpytorch.kernels import Kernel, RBFKernel, MaternKernel
-from gpytorch.constraints import Positive
 
-from hbolfi import settings
+from .. import settings
 
 
 def make_scaled(cls: Kernel):
     def __init__(self,
-                 outputscale_prior: Optional[Prior] = None,
-                 outputscale_constraint: Optional[torch.nn.Module] = None,
+                 priors: Optional[Dict[str, Prior]] = None,
                  **kwargs):
         cls.__init__(self, **kwargs)
-        if outputscale_prior is not None:
-            outputscale_constraint = outputscale_prior.constraint
-        if outputscale_constraint is None:
-            outputscale_constraint = Positive()
         outputscale = torch.zeros(*self.batch_shape) if len(self.batch_shape) else torch.tensor(0.)
         self.register_parameter(name="raw_outputscale", parameter=torch.nn.Parameter(outputscale))
-        if outputscale_prior is not None:
-            self.register_prior(
-                "outputscale_prior", outputscale_prior, lambda: self.outputscale, lambda v: self._set_outputscale(v)
-            )
-        self.register_constraint("raw_outputscale", outputscale_constraint)
+        self.set_priors(priors)
 
     def outputscale_getter(self):
         return self.raw_outputscale_constraint.transform(self.raw_outputscale)
@@ -48,15 +39,21 @@ def make_scaled(cls: Kernel):
             outputscales = outputscales.view(*outputscales.shape, 1, 1)
             return orig_output.mul(outputscales)
 
-    def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True) -> Kernel:
+    def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True,
+                   without_initial_value=False) -> Kernel:
         if priors is None:
             priors = {}
         if with_default or 'outputscale_prior' in priors:
             prior = priors.get('outputscale_prior', settings.outputscale.prior())
             self.register_prior('outputscale_prior', prior, lambda: self.outputscale,
                                 lambda v: self._set_outputscale(v))
+            if without_initial_value:
+                init_value = prior.constraint.initial_value
+                prior.constraint.initial_value = None
             self.register_constraint('raw_outputscale', prior.constraint)
-        cls.set_priors(self, priors=priors, with_default=with_default)
+            if without_initial_value:
+                prior.constraint.initial_value = init_value
+        cls.set_priors(self, priors=priors, with_default=with_default, without_initial_value=without_initial_value)
         return self
 
     def extra_repr(self) -> str:

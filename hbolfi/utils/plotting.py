@@ -6,7 +6,6 @@ import torch
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import matplotlib.axes
-import matplotlib.cm
 from matplotlib.colors import Colormap
 
 
@@ -17,7 +16,7 @@ def plot_contour(func: Callable[[torch.Tensor], torch.Tensor],
                  levels: Optional[Union[int, Sequence, np.ndarray]] = None,
                  fill: bool = False,
                  colors: Union[str, Sequence[str]] = 'k',
-                 cmap: Union[str, Colormap] = mpl.cm.jet,
+                 cmap: Union[str, Colormap] = plt.get_cmap('jet'),
                  minmax_scale: bool = False,
                  **kwargs) -> mpl.axes.Axes:
     if ax is None:

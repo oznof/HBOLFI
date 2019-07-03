@@ -1,16 +1,18 @@
-from typing import Tuple
+from typing import Tuple, Union
 
 import torch
 from torch.distributions import AffineTransform, biject_to, constraints
+from gpytorch.kernels import AdditiveKernel
 
 from .acquisition_base import AcquisitionFunction
-from ..models import AdditiveStructureGPModel
+from ..models import AdditiveStructureGPModel, BayesianGPModel
 
 
 # for now, this only works if the search_space is a hypercube specified by 'bounds'
 class AdditiveAcquisitionFunction(AcquisitionFunction):
-    def __init__(self, model: AdditiveStructureGPModel, *args, **kwargs):
-        assert (isinstance(model, AdditiveStructureGPModel))
+    def __init__(self, model: Union[AdditiveStructureGPModel, BayesianGPModel], *args, **kwargs):
+        if isinstance(model, AdditiveStructureGPModel) or isinstance(model, BayesianGPModel):
+            assert(isinstance(model.kernel, AdditiveKernel))
         super().__init__(model, *args, **kwargs)
         self.active_dims = torch.arange(self.dim)
         assert('bounds' in self.search_space)
@@ -24,7 +26,7 @@ class AdditiveAcquisitionFunction(AcquisitionFunction):
         self._cached_transforms[bounds] = transforms
         return transforms
 
-    def optimize(self, x0: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    def optimize(self, x0: torch.Tensor, retain_graph: bool = False) -> Tuple[torch.Tensor, float]:
         """
         The acquisition function decomposes additively over the partition.
         The arg min is given by the union of the arg mins.
@@ -42,7 +44,7 @@ class AdditiveAcquisitionFunction(AcquisitionFunction):
             # it still expects inputs of the same shape, slicing internally
             # so there is the need to augment the input before evaluation
             self.model.restrict(i)
-            loc[0, active_dims], v = super().optimize(x0[:, active_dims])
+            loc[0, active_dims], v = super().optimize(x0[:, active_dims], retain_graph=retain_graph)
             val += v
         # restore original model, bounds, active_dims
         self.model.unrestrict()

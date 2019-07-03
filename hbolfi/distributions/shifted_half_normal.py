@@ -1,7 +1,7 @@
 import torch
 from torch.distributions import constraints
-from torch.distributions.transforms import AbsTransform, AffineTransform
-from torch.distributions.normal import Normal
+from torch.distributions.transforms import AffineTransform
+from torch.distributions import HalfNormal
 from torch.distributions.transformed_distribution import TransformedDistribution
 from torch.distributions.utils import broadcast_all
 
@@ -17,13 +17,13 @@ class ShiftedHalfNormal(TransformedDistribution):
         loc (float or Tensor): location / shift
         scale (float or Tensor): scale of the full Normal distribution
     """
-    arg_constraints = {'loc': constraints.positive, 'scale': constraints.positive}
+    arg_constraints = {'loc': constraints.real, 'scale': constraints.positive}
     has_rsample = True
 
     def __init__(self, loc, scale, validate_args=None):
         self.loc, self.scale = broadcast_all(loc, scale)
-        base_dist = Normal(0., scale)
-        super().__init__(base_dist, [AbsTransform(), AffineTransform(loc=torch.as_tensor(loc), scale=torch.tensor(1.))],
+        base_dist = HalfNormal(scale)
+        super().__init__(base_dist, [AffineTransform(loc=self.loc, scale=1.)],
                          validate_args=validate_args)
 
     @constraints.dependent_property

@@ -23,10 +23,15 @@ class LCB(AcquisitionFunction):
         return 2 * ((2 * self.dim + 2) * torch.log(self.t) + math.log(math.pi ** 2 / (3 * self.delta)))
 
     def evaluate(self, x: torch.Tensor) -> torch.Tensor:
+        x = x.view(-1, self.dim)
         pred_mvn = self.model(x)
         mean = pred_mvn.mean
         var = pred_mvn.variance * self.beta
-        return mean - var.sqrt()
+        # print("IN EVALUATE")
+        # print("x: ", x)
+        # print("mean: ", mean)
+        # print("var: ", var)
+        return (mean - var.sqrt()).view(-1, x.size(0)).mean(0)
 
 
 # AdditiveAcquisitionFunction is added first, so that it calls
@@ -44,6 +49,6 @@ class LCBAdd(AdditiveAcquisitionFunction, LCB):
             return torch.as_tensor(self._beta)
         return 0.2 * self.max_d * torch.log(2 * self.t)
 
-    def optimize(self, x0: torch.Tensor) -> Tuple[torch.Tensor, float]:
+    def optimize(self, x0: torch.Tensor, retain_graph: bool = False) -> Tuple[torch.Tensor, float]:
         self.max_d = max([len(pi) for pi in self.model.additive_structure])
-        return super().optimize(x0)
+        return super().optimize(x0, retain_graph=retain_graph)

@@ -1,5 +1,4 @@
 from typing import Tuple, Optional
-import copy
 from math import log
 from time import time
 
@@ -12,7 +11,7 @@ from ...models import AdditiveStructureGPModel
 from ...utils import rng
 
 
-# TODO: save models to tempdir and load them
+# TODO: save models to tempdir and load them if the number of dimensions is high
 class GibbsStructureSelector(MCMCStructureSelector):
     """
     Gibbs sampler for non-overlapping additive decompositions.
@@ -57,7 +56,7 @@ class GibbsStructureSelector(MCMCStructureSelector):
                     llik[m] = -float('inf')
                 else:
                     # build model
-                    new_model = copy.deepcopy(curr_model)
+                    new_model = curr_model.clone()
                     kernel_list = list(new_model.kernel.kernels)
                     kernel_minus = kernel_list[z0]  # kernel from which d must be removed
                     kernel_plus = kernel_list[m] if m < len(kernel_list) else None  # kernel to which d must be added
@@ -80,7 +79,7 @@ class GibbsStructureSelector(MCMCStructureSelector):
                     else:  # singleton kernel_minus must be removed
                         kernel_list.pop(z0)
                     new_model.set_kernel(AdditiveKernel(*kernel_list))
-                    new_model.optimize()
+                    new_model.fit()
                     llik_evals += 1
                     if len_group == 1:
                         singleton_model = new_model
@@ -94,9 +93,11 @@ class GibbsStructureSelector(MCMCStructureSelector):
                 break
         return curr_model, llik_evals
 
-    def run(self, iters: int = 1) -> AdditiveStructureGPModel:
+    def run(self, model: Optional[AdditiveStructureGPModel] = None, iters: int = 1) -> AdditiveStructureGPModel:
+        if model is not None:
+            self.current_model = model
         if self.verbose:
-            print("In GibbsStructureSelector")
+            print(f"In {self.__class__.__name__}")
         i = 0
         start0 = time()
         with rng(self.rng_state) as rs:
@@ -116,5 +117,5 @@ class GibbsStructureSelector(MCMCStructureSelector):
         if self.save_trace:
             self.record(self.current_model)
         if self.verbose:
-            print(f"Out GibbsStructureSelector, total time={time() - start0:.3f}")
+            print(f"Out {self.__class__.__name__}, total time={time() - start0:.3f}")
         return self.current_model

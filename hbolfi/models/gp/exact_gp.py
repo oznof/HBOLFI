@@ -1,32 +1,29 @@
 #!/usr/bin/env python3
-from typing import Any, Dict, Tuple, Optional, Sequence
+import time
+from typing import Any, Dict, Tuple, Optional
 from collections import OrderedDict
+import copy
 
 import numpy as np
 import scipy
 import scipy.optimize
 
 import torch
-from torch.optim import Adam, SGD
 from torch.distributions import Transform
 from gpytorch.models import ExactGP
-from gpytorch.means import Mean, ConstantMean
+from gpytorch.means import Mean
 from gpytorch.kernels import Kernel
 from gpytorch.distributions import MultivariateNormal
 from gpytorch.likelihoods import GaussianLikelihood
 from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.priors import Prior
+from pyro.distributions import Delta
 
 from ..surrogate_model import SurrogateModel
-from ...distributions import DeltaPrior
+from ... import settings
 from ...means import QuadPolyMean
-
-from hbolfi import settings
-
-OPTIMIZERS = {'Adam': Adam, 'SGD': SGD}  # only need to list pytorch optimizers, LBFGS is from scipy
-DEFAULT_OPTIMIZER = 'LBFGS'
-DEFAULT_OPTIMIZER_OPTIONS = {'Adam': {'lr': 0.01, 'amsgrad': False}, 'SGD': {'lr': 0.1, 'momentum': 0.9}}
-DEFAULT_MAXITER = 1000
+# TODO: REMOVE THIS
+from ...kernels import ScaleRBFKernel, CylindricalKernel
 
 
 class ExactGPModel(ExactGP, SurrogateModel):
@@ -36,31 +33,32 @@ class ExactGPModel(ExactGP, SurrogateModel):
                  likelihood: Optional[GaussianLikelihood] = None,
                  mean: Optional[Mean] = None,
                  priors: Optional[Dict[str, Prior]] = None,
-                 optimizer: str = DEFAULT_OPTIMIZER,
-                 maxiter: int = DEFAULT_MAXITER,
+                 optimizer: Optional[str] = None,
+                 maxiter: Optional[int] = None,
                  optimizer_options: Optional[Dict[str, Any]] = None,
                  to_centered_cube_transform: Optional[Transform] = None):
         if priors is None:
             priors = {}
-        self.priors = priors
         if likelihood is None:
             noise_prior = priors.get('noise_prior', settings.noise.prior())
             likelihood = GaussianLikelihood(noise_prior=noise_prior, noise_constraint=noise_prior.constraint)
         super().__init__(train_inputs, train_targets, likelihood)
+        self.priors = priors
         if mean is None:
             input_dim = kernel.active_dims.numel()
             mean = QuadPolyMean(input_dim, priors=priors)
         self.mean = mean
         self.kernel = kernel
-        self.optimizer = optimizer
+        self.optimizer = settings.default_optimizer.value() if optimizer is None else optimizer
+        maxiter = settings.default_maxiter.value() if maxiter is None else maxiter
         if not optimizer_options:
-            if optimizer in OPTIMIZERS:  # pytorch optimizers
-                optimizer_options = DEFAULT_OPTIMIZER_OPTIONS[optimizer]
-            elif optimizer == 'LBFGS':  # uses scipy
-                optimizer_options = {'maxiter': int(maxiter)}
+            if self.optimizer in settings.torch_optimizers:
+                optimizer_options = settings.default_torch_optimizer_options[self.optimizer]
+            elif self.optimizer == 'LBFGS':
+                optimizer_options = {'maxiter': maxiter}
             else:
                 raise RuntimeError("Invalid optimizer.")
-        self.maxiter = optimizer_options.get('maxiter', int(maxiter))
+        self.maxiter = optimizer_options.get('maxiter', maxiter)
         self.to_centered_cube_transform = to_centered_cube_transform
         self.optimizer_options = optimizer_options
         self.log_likelihood = None  # only updated, when optimize is called
@@ -73,22 +71,34 @@ class ExactGPModel(ExactGP, SurrogateModel):
 
     def load_init(self):
         if settings.initialize_before_optimization.on():
-            for prior_name, _, _, _ in self.named_priors():
-                self.sample_from_prior(prior_name)
+            if settings.initialize_by_sampling.on():
+                # explicitly iterating over these submodules allows to define other submodules for which
+                # we do not want to initialize, e.g. can create copies to save states
+                for submodule in [self.likelihood, self.mean, self.kernel]:
+                    for prior_name, _, _, _ in submodule.named_priors():
+                        submodule.sample_from_prior(prior_name)
+            else:
+                for submodule in [self.likelihood, self.mean, self.kernel]:
+                    for prior_name, prior, _, _ in submodule.named_priors():
+                        submodule.initialize(**{prior_name.replace('_prior', '').replace('raw_', ''):
+                                                prior.constraint.initial_value})
 
-    def optimize(self, train_inputs: Optional[torch.Tensor] = None,
-                 train_targets: Optional[torch.Tensor] = None):
+    def fit(self, train_inputs: Optional[torch.Tensor] = None,
+            train_targets: Optional[torch.Tensor] = None, verbose: bool = False):
+        if verbose:
+            print("Optimizing hyperparameters...", end='')
+            start_time = time.time()
         self.load_init()
         mll = ExactMarginalLogLikelihood(self.likelihood, self)
         if train_inputs is not None and train_targets is not None:
             self.set_train_data(inputs=train_inputs, targets=train_targets, strict=False)
         self.train()
         if self.optimizer == 'LBFGS':
-            self.optimize_lbfgs()
+            self.optimize_lbfgs(verbose=verbose)
         else:
             params = []
             for name, prior, _, _ in self.named_priors():
-                if not isinstance(prior, DeltaPrior):
+                if not isinstance(prior, Delta):
                     name = name.replace('_prior', '')
                     (*submodules, name) = name.split('.')
                     module = self
@@ -96,7 +106,7 @@ class ExactGPModel(ExactGP, SurrogateModel):
                         module = getattr(module, submodule)
                     params.append(getattr(module, 'raw_' + name))
             if params:
-                optimizer = OPTIMIZERS[self.optimizer](params, self.optimizer_options)
+                optimizer = settings.torch_optimizers[self.optimizer](params, **self.optimizer_options)
 
                 def closure() -> float:
                     optimizer.zero_grad()
@@ -105,9 +115,11 @@ class ExactGPModel(ExactGP, SurrogateModel):
                     loss.backward()
                     return loss.item()
 
-                prev_loss = None
-                for _ in range(self.iters):
-                    curr_loss = optimizer.step(closure).item()
+                prev_loss = 0
+                for _ in range(self.maxiter):
+                    curr_loss = optimizer.step(closure)
+                    # if verbose:
+                    #     print(f"iter {_}: loss={curr_loss}")
                     ftol = abs(prev_loss - curr_loss) / max(1, abs(prev_loss), abs(curr_loss)) if prev_loss else 1
                     if ftol <= 1e-9:
                         break
@@ -117,30 +129,48 @@ class ExactGPModel(ExactGP, SurrogateModel):
                     #    break
         self.log_likelihood = mll(self(self.train_inputs[0]), self.train_targets).item() * self.train_targets.size(-1)
         self.eval()
+        if verbose:
+            print(f"Done. time={time.time()-start_time:.3f}. LogLikelihood={self.log_likelihood}")
+            # TODO: remove this
+            if isinstance(self.kernel, CylindricalKernel):
+                print(f"outputscale={self.kernel.radial_base_kernel.outputscale}, "
+                      f"lengthscale={self.kernel.radial_base_kernel.lengthscale}")
+            elif isinstance(self.kernel, ScaleRBFKernel):
+                print(f"outputscale={self.kernel.outputscale}, "
+                      f"lengthscale={self.kernel.lengthscale}")
+            print(f"mean_a={self.mean.a}, mean_b={self.mean.b}, mean_c={self.mean.c}")
         return self
 
-    def optimize_lbfgs(self):
+    def optimize_lbfgs(self, verbose: bool = False):
         # (raw) unconstrained parameter names
         param_state = OrderedDict()
         for name, prior, _, _ in self.named_priors():
-            if not isinstance(prior, DeltaPrior):
-                name = name.replace('_prior', '')
-                (*submodules, name) = name.split('.')
-                pname = 'raw_' + name
-                module = self
-                for submodule in submodules:
-                    module = getattr(module, submodule)
-                param_state[pname] = getattr(module, pname)
+            name = name.replace('_prior', '')
+            (*submodules, name) = name.split('.')
+            pname = 'raw_' + name
+            module = self
+            for submodule in submodules:
+                module = getattr(module, submodule)
+            param = getattr(module, pname)
+            if isinstance(prior, Delta):
+                param.requires_grad_(False)
+            else:
+                param_state[pname] = param.requires_grad_(True)
         if param_state:
             mll = ExactMarginalLogLikelihood(self.likelihood, self)
 
             def fun_and_grad(raw_x: np.ndarray) -> Tuple[float, np.ndarray]:
                 self.zero_grad()
                 self.load_array_state(raw_x, param_state)
+                if verbose:
+                    print(param_state)
                 output = self(self.train_inputs[0])
                 loss = -mll(output, self.train_targets)
                 loss.backward()
                 grad = self.state_to_array(param_state, grad=True)
+                if verbose:
+                    print(loss.item())
+                    print([v.grad for v in param_state.values()])
                 return loss.item(), grad
 
             raw_x0 = self.state_to_array(param_state)
@@ -151,12 +181,64 @@ class ExactGPModel(ExactGP, SurrogateModel):
     @staticmethod
     def state_to_array(state: OrderedDict, grad: bool = False):
         if not grad:
-            return np.concatenate([v.detach().view(-1).cpu().double().clone().numpy() for v in state.values()])
-        return np.concatenate([v.grad.detach().view(-1).cpu().double().clone().numpy() for v in state.values()])
+            return np.concatenate([v.detach().clone().view(-1).cpu().double().numpy() for v in state.values()])
+        return np.concatenate([v.grad.detach().clone().view(-1).cpu().double().numpy() for v in state.values()])
 
     @staticmethod
     def load_array_state(array: np.ndarray, state: OrderedDict):
-        i = 0
-        for p, v in state.items():
-            v.copy_(torch.tensor(array[i:v.numel()]))
-            i += v.numel()
+        with torch.no_grad():
+            i = 0
+            for p, v in state.items():
+                v.copy_(torch.tensor(array[i:i+v.numel()]).view(v.shape))
+                i += v.numel()
+
+    def get_fantasy_model(self, inputs, targets, **kwargs):
+        model = ExactGP.get_fantasy_model(self, inputs, targets, **kwargs)
+        # fix some bad references that happen inside get_fantasy_model
+        model.likelihood.set_priors(self.priors, without_initial_value=True)
+        model.prediction_strategy.likelihood = model.likelihood
+        model.kernel.set_priors(model.priors, without_initial_value=True)
+        model.mean.set_priors(model.priors, without_initial_value=True)
+        return model
+
+    def clone(self):
+        # some attributes are not deep copied and
+        # priors are set with defaults (unless specified during __init__) because they contain
+        # references to the original object through closures.
+        # in general, it's difficult to know exactly what transformations were defined
+        # use prior context managers or specify the priors dict to get exact clones
+        train_inputs, train_targets = self.train_inputs, self.train_targets
+        to_centered_cube_transform, likelihood = self.to_centered_cube_transform, self.likelihood
+        self.train_inputs, self.train_targets = (None, ) * 2
+        self.to_centered_cube_transform, self.likelihood = (None, ) * 2
+        new = copy.deepcopy(self)
+        self.train_inputs, self.train_targets = train_inputs, train_targets
+        self.to_centered_cube_transform, self.likelihood = to_centered_cube_transform, likelihood
+        new.train_inputs, new.train_targets = train_inputs, train_targets
+        new.to_centered_cube_transform = to_centered_cube_transform
+        new.likelihood = copy.deepcopy(self.likelihood).set_priors(new.priors, without_initial_value=True)
+        new.kernel.set_priors(new.priors, without_initial_value=True)
+        new.mean.set_priors(new.priors, without_initial_value=True)
+        return new
+
+    def __copy__(self):
+        return self.clone()
+
+    def _check_prior_setters(self):
+        for prior_name, prior, closure, setting_closure in self.named_priors():
+            name = prior_name.replace('_prior', '')
+            constraint = self.constraint_for_parameter_name(name)
+            if constraint is None:
+                names = name.split('.')
+                raw_name = '.'.join(names[:-1] + ['raw_' + names[-1]])
+                constraint = self.constraint_for_parameter_name(raw_name)
+            orig_val = closure().detach().clone()
+            new_val = constraint.transform(constraint.inverse_transform(orig_val) + 1.17)
+            setting_closure(new_val)
+            attr = self
+            for m in name.split('.'):
+                attr = getattr(attr, m)
+            if not torch.allclose(attr, new_val):
+                raise RuntimeError(f"{prior_name} has not been set correctly.")
+            setting_closure(orig_val)
+        return True

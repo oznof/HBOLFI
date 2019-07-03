@@ -1,19 +1,25 @@
 import time
 import copy
+
 import torch
 import gpytorch
+from gpytorch.distributions import MultivariateNormal
 
-from hbolfi import AdditiveStructureGPModel, LCB, QuadPolyMean, settings, DeltaPrior
-from hbolfi.utils import rng
+from .. import settings
+from ..acquisitions import LCB
+from ..distributions import DeltaPrior
+from ..means import QuadPolyMean
+from ..models import AdditiveStructureGPModel, SurrogateModel
+from ..utils import rng
 
 
-class QuadFormModel:
-    def __init__(self, kernel, num_dims, corr, search_space, mu_min=0.25,
-                 mean_function=None, seed=117, copy_kernel=True, **kwargs):
-        if not isinstance(kernel, gpytorch.kernels.AdditiveKernel):
-            raise RuntimeError("QuadFormModel can only take in an AdditiveKernel")
-        self.kernel = copy.deepcopy(kernel) if copy_kernel else kernel
-        self.partition = [k.active_dims for k in kernel.kernels]
+class QuadFormModel(SurrogateModel):
+    def __init__(self, partition, num_dims, corr, search_space, mu_min=0.25,
+                 mean_function=None, seed=None, **kwargs):
+        super().__init__()
+        delattr(self, 'train_inputs')
+        delattr(self, 'train_targets')
+        self.partition = partition
         self.num_dims = num_dims
         self.corr = corr
         self._build_corr_matrix()
@@ -29,7 +35,10 @@ class QuadFormModel:
             for p in self.mean_function.parameters():  # freeze parameters
                 p.requires_grad = False
         self.seed = seed
-        self.rng_obs = torch.Generator().manual_seed(self.seed).get_state()  # for generating noisy observations
+        if seed is None:
+            seed = torch.get_rng_state()
+        # for generating noisy observations
+        self.rng_obs = torch.Generator().manual_seed(seed).get_state() if isinstance(seed, int) else seed
         noise = torch.as_tensor(kwargs.get('noise', 1e-2))
         noise_prior = DeltaPrior(noise, initial_value=noise)
         self.likelihood = gpytorch.likelihoods.GaussianLikelihood(noise_prior=noise_prior,
@@ -39,7 +48,7 @@ class QuadFormModel:
         try:
             # during init, this might not work for classes that overload the observe_noiseless method
             self.min_val = self.observe_noiseless(self.min_loc)
-        except:
+        except RuntimeError:
             self.min_val = None
 
     def _build_corr_matrix(self):
@@ -54,19 +63,19 @@ class QuadFormModel:
             self.Cinv[pi_idx] = torch.inverse(_corr)
         self._a_weights = 0.5 * self.Cinv[range(self.num_dims), range(self.num_dims)]
 
-    def observe_noiseless(self, x: torch.Tensor):
+    def observe_noiseless(self, x: torch.Tensor) -> torch.Tensor:
         x = x.view(-1, self.num_dims)
         xdiff = x - self.min_loc
-        f = 0.5 * torch.einsum('ni,id,nd->n', xdiff, self.Cinv, xdiff) - x.pow(2) @ self._a_weights
+        f = -x.pow(2).matmul(self._a_weights) + 0.5 * torch.einsum('ni,id,nd->n', [xdiff, self.Cinv, xdiff])
         f += self.mean_function(x)  # by default, mean_function is x.pow(2) @ self._a_weights
         return f
 
-    def __call__(self, x: torch.Tensor):
+    def __call__(self, x: torch.Tensor) -> MultivariateNormal:
         mean = self.observe_noiseless(x)
         covar = gpytorch.lazify(torch.zeros(mean.numel(), mean.numel()))
-        return gpytorch.distributions.MultivariateNormal(mean, covar)
+        return MultivariateNormal(mean, covar)
 
-    def observe(self, x: torch.Tensor):
+    def observe(self, x: torch.Tensor) -> torch.Tensor:
         with rng(self.rng_obs) as rs:
             x = x.view(-1, self.num_dims)
             mvn = self.likelihood(self(x))
@@ -86,13 +95,19 @@ class QuadFormModel:
 class SemiparametricQuadFormModel(QuadFormModel):
     def __init__(self, kernel, num_dims, corr, search_space, mu_min=0.25,
                  radii=tuple([0.01, 0.1, 0.2, 0.5]), num_s=200,
-                 mean_function=None, seed=117, copy_kernel=True,
+                 mean_function=None, seed=None, copy_kernel=True,
                  **kwargs):
+        if not isinstance(kernel, gpytorch.kernels.AdditiveKernel):
+            raise RuntimeError(f"{self.__class_.__name__} can only take in an AdditiveKernel")
+        self.kernel = copy.deepcopy(kernel) if copy_kernel else kernel
+        partition = [k.active_dims for k in kernel.kernels]
+        super().__init__(partition, num_dims, corr, search_space, mu_min, mean_function, seed, **kwargs)
         # settings for generating data for the nonparametric part
         self.radii = radii
         self.num_s = num_s
-        self.rng_data = torch.Generator().manual_seed(seed).get_state()
-        super().__init__(kernel, num_dims, corr, search_space, mu_min, mean_function, seed, copy_kernel, **kwargs)
+        if seed is None:
+            seed = torch.get_rng_state()
+        self.rng_data = torch.Generator().manual_seed(seed).get_state() if isinstance(seed, int) else seed
         # necessary to find optimum due to the nonparametric part of the model
         # it will be near self.min_loc
         self.acquisition = kwargs.get('acquisition', LCB)
@@ -142,8 +157,8 @@ class SemiparametricQuadFormModel(QuadFormModel):
                     corr_group = self.C[(pi.unsqueeze(1), pi.unsqueeze(0))]
                     x_aux[:, pi] = r * x_aux[:, pi] / torch.norm(x_aux[:, pi], dim=1).unsqueeze(1)  # sphere
                     x_aux[:, pi] = x_aux[:, pi] @ torch.cholesky(corr_group, upper=True)
-                    #if i < 2:
-                    #    x_aux[:, pi] *= torch.rand(self.num_s, 1, generator=self.rng_data).pow(1./len(pi))  # ball
+                    # if i < 2:
+                    #     x_aux[:, pi] *= torch.rand(self.num_s, 1, generator=self.rng_data).pow(1./len(pi))  # ball
                 x[1 + i * self.num_s:1 + (i + 1) * self.num_s] = x_aux + self.min_loc
             assert(self._within_bounds(x, slack=0.))
             # get noiseless observations
@@ -164,6 +179,5 @@ class SemiparametricQuadFormModel(QuadFormModel):
             return self.__dict__[item]
         except KeyError:
             if item == "model":
-                raise KeyError
+                raise RuntimeError
             return getattr(self.model, item)
-

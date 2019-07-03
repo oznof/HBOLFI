@@ -3,12 +3,11 @@ from typing import Sequence, Union, Optional
 import math
 
 import torch
-from gpytorch.mlls import ExactMarginalLogLikelihood
 from gpytorch.models import ExactGP
 
 
 def partition_to_assignment(partition: Sequence[Union[torch.Tensor, list, tuple]]) -> torch.Tensor:
-    z = torch.empty(int(math.fsum([len(group) for group in partition])))
+    z = torch.empty(int(math.fsum([torch.as_tensor(group).numel() for group in partition])))
     for v, p in enumerate(partition):
         z[p] = v
     return z
@@ -47,22 +46,18 @@ def partition_metrics(partition_ref: Sequence[Union[torch.Tensor, list, tuple]],
 
 def summary_stats(model: ExactGP, test_inputs: torch.Tensor, test_targets: torch.Tensor,
                   test_llik_ref: Optional[torch.Tensor] = None, res_dict: Optional[OrderedDict] = None,
-                  preffix: str = '', suffix: str = ''):
-    llik = model.log_likelihood
-    mll = ExactMarginalLogLikelihood(model.likelihood, model)
+                  prefix: str = '', suffix: str = ''):
+    llik_map = model.log_likelihood
     test_mvn = model(test_inputs)
-    disc_error = torch.norm(test_mvn.mean - test_targets, p=1, dim=-1).mean().item()
-    test_llik = mll(test_mvn, test_targets).item()
-    keys = ['llik', 'disc_error', 'test_llik']
-    values = [llik, disc_error, test_llik]
+    disc_error = (torch.norm(test_mvn.mean - test_targets, p=1, dim=-1) / test_targets.size(-1)).item()
+    test_llik = (model.likelihood(test_mvn).log_prob(test_targets) / test_targets.size(-1)).item()
+    keys = ['llik_map', 'disc_error', 'test_llik']
+    values = [llik_map, disc_error, test_llik]
     if test_llik_ref is not None:
         keys.append('test_llik_ratio')
         values.append(test_llik - test_llik_ref)
-    keys = (preffix + k + suffix for k in keys)
+    keys = (prefix + k + suffix for k in keys)
     if res_dict is None:
         res_dict = OrderedDict()
     res_dict.update(OrderedDict(zip(keys, values)))
     return res_dict
-
-
-

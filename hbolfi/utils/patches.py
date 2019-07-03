@@ -1,7 +1,11 @@
+import warnings
 import math
+
 import torch
 import gpytorch
 from gpytorch.constraints import Interval
+
+from .. import settings
 
 
 # gpytorch.module.Module.sample_from_prior does not take into consideration the sample shape
@@ -58,21 +62,36 @@ def _extract_named_priors(module, memo=None, prefix=""):
             yield name, prior, closure, inv_closure
 
 
+def _load_raw_parameters(self, **kwargs):
+    for name, val in kwargs.items():
+        if '.' in name:
+            module, name = self._get_module_and_name(name)
+            module._load_raw_parameters(**{name: val})
+        else:
+            delattr(self, name)
+            setattr(self, name, val)
+
+
+def gaussian_likelihood_set_priors(self, priors=None, with_default=True, without_initial_value=False):
+    if priors is None:
+        priors = {}
+    if with_default or 'noise_prior' in priors:
+        prior = priors.get('noise_prior', settings.noise.prior())
+        module = self.noise_covar
+        module.register_prior('noise_prior', prior, lambda: module.noise, lambda v: module._set_noise(v))
+        if without_initial_value:
+            init_value = prior.constraint.initial_value
+            prior.constraint.initial_value = None
+        module.register_constraint('raw_noise', prior.constraint)
+        if without_initial_value:
+            prior.constraint.initial_value = init_value
+    return self
+
+
 # the problem appears in inv_matmul when trying to compute second order derivatives
 # for now, bypass it by calling torch.solve, which uses LU decomposition
 # make sure to disable gpytorch.settings.fast_computations.solves, otherwise inv_matmul is still used
 def exact_predictive_covar(self, test_test_covar, test_train_covar):
-    """
-    Computes the posterior predictive covariance of a GP
-
-    Args:
-        test_train_covar (:obj:`gpytorch.lazy.LazyTensor`): Covariance matrix between test and train inputs
-        test_test_covar (:obj:`gpytorch.lazy.LazyTensor`): Covariance matrix between test inputs
-
-    Returns:
-        :obj:`gpytorch.lazy.LazyTensor`: A LazyTensor representing the predictive posterior covariance of the
-                                           test points
-    """
     if gpytorch.settings.fast_pred_var.on():
         self._last_test_train_covar = test_train_covar
 
@@ -164,3 +183,49 @@ def interval_inverse_transform(self, transformed_tensor):
     scale = self.upper_bound - self.lower_bound
     tensor = self._inv_transform((transformed_tensor - self.lower_bound) / scale)
     return tensor
+
+
+def psd_safe_cholesky(A, upper=False, out=None, jitter=None):
+    """Compute the Cholesky decomposition of A. If A is only p.s.d, add a small jitter to the diagonal.
+    Args:
+        :attr:`A` (Tensor):
+            The tensor to compute the Cholesky decomposition of
+        :attr:`upper` (bool, optional):
+            See torch.cholesky
+        :attr:`out` (Tensor, optional):
+            See torch.cholesky
+        :attr:`jitter` (float, optional):
+            The jitter to add to the diagonal of A in case A is only p.s.d. If omitted, chosen
+            as 1e-6 (float) or 1e-8 (double)
+    """
+    try:
+        L = torch.cholesky(A, upper=upper, out=out)
+        # TODO: Remove once fixed in pytorch (#16780)
+        if A.dim() > 2 and A.is_cuda:
+            if torch.isnan(L if out is None else out).any():
+                raise RuntimeError
+
+        return L
+    except RuntimeError as e:
+        if jitter is None:
+            jitter = 1e-6 if A.dtype == torch.float32 else 1e-8
+        jitter_ori = jitter
+        print(A)
+        print("===========")
+        print(A.diag())
+        for i in range(5):
+            print(f"GOING IN jitter={jitter_ori * (10 ** i)}")
+            jitter = jitter_ori * (10 ** i)
+            Aprime = A.clone()
+            Aprime.diagonal(dim1=-2, dim2=-1).add_(jitter)
+            try:
+                L = torch.cholesky(Aprime, upper=upper, out=out)
+                # TODO: Remove once fixed in pytorch (#16780)
+                if A.dim() > 2 and A.is_cuda:
+                    if torch.isnan(L if out is None else out).any():
+                        raise RuntimeError("singular")
+                warnings.warn(f"A not p.d., added jitter of {jitter} to the diagonal", RuntimeWarning)
+                return L
+            except RuntimeError:
+                continue
+        raise e

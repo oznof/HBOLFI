@@ -1,8 +1,6 @@
 from typing import List, Type, Tuple, Optional
-import time
 import math
 from math import log
-import copy
 
 import torch
 from gpytorch.kernels import Kernel, AdditiveKernel
@@ -32,13 +30,13 @@ class SplitMergeProposal(MHProposal):
         old_active_dims = kernel_to_split.active_dims
         while True:  # make sure there is a split
             split_vec = torch.rand(old_active_dims.numel()) < 0.5
-            if torch.sum(split_vec) != 0 and torch.sum(1 - split_vec) != 0:
+            if torch.sum(split_vec) != 0 and torch.sum(~split_vec) != 0:
                 break
         ard = bool(kernel_to_split.ard_num_dims)
         active_dims1 = old_active_dims[split_vec]
         kernel_cls = kernel_to_split.__class__
         kernel1 = kernel_cls(active_dims=active_dims1, ard_num_dims=active_dims1.numel() if ard else None)
-        active_dims2 = old_active_dims[1 - split_vec]
+        active_dims2 = old_active_dims[~split_vec]
         kernel2 = kernel_cls(active_dims=active_dims2, ard_num_dims=active_dims2.numel() if ard else None)
         # prob split:
         # 1/|non_singleton_kernels| * 1/(2^(|dims_in_splitted_kernel|-1) - 1)
@@ -95,13 +93,15 @@ class MHStructureSelector(MCMCStructureSelector):
         self.proposal = SplitMergeProposal if not proposal else proposal
 
     def sample(self) -> Tuple[AdditiveStructureGPModel, float, float]:
-        new_model = copy.deepcopy(self.current_model)
+        new_model = self.current_model.clone()
         new_kernel_list, proposal_logprob, reverse_logprob = self.proposal.propose(list(new_model.kernel.kernels))
         new_model.set_kernel(AdditiveKernel(*new_kernel_list))
-        new_model.optimize()
+        new_model.fit()
         return new_model, proposal_logprob, reverse_logprob
 
-    def run(self, iters: int = 1) -> AdditiveStructureGPModel:
+    def run(self, model: Optional[AdditiveStructureGPModel] = None, iters: int = 1) -> AdditiveStructureGPModel:
+        if model is not None:
+            self.current_model = model
         with rng(self.rng_state) as rs:
             for i in range(iters):
                 new_model, proposal_logprob, reverse_logprob = self.sample()

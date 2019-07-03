@@ -1,6 +1,5 @@
 from typing import Dict, Optional, Union, Sequence
 import math
-import functools
 
 import torch
 from torch.distributions import Distribution
@@ -64,8 +63,9 @@ class BOLFI(BayesianOptimization):
               with_prior:     bool = True,
               **kwargs) -> Union[Distribution, torch.Tensor, Sequence[torch.Tensor]]:
 
-        seed = seed if seed else self.seed
-        self.search_space['dim'] = self.dim
+        seed = self.seed if seed is None else seed
+        if 'dim' not in self.search_space:
+            self.search_space['dim'] = self.dim
         log_prob = ((lambda p: self.log_prob(threshold, p)) if with_prior else
                     (lambda p: self.unnormalized_loglikelihood(threshold, p)))
         if method == 'nuts':
@@ -77,8 +77,10 @@ class BOLFI(BayesianOptimization):
                 raw_initial_params = {'raw_x': raw_initial_params}
             else:
                 raw_initial_params = None
-            potential_fn = functools.partial(self.potential_function, threshold=threshold, model=self.model,
-                                             prior=self.prior)
+
+            def potential_fn(param):
+                return self.potential_function(param, threshold=threshold, model=self.model, prior=self.prior)
+
             res = nuts(potential_fn,
                        transforms={'raw_x': self.transforms['from_real'].inv},
                        num_samples=num_samples, initial_params=raw_initial_params,
@@ -92,7 +94,7 @@ class BOLFI(BayesianOptimization):
             initial_params = map_estimate(log_prob, self.search_space, initial_params, seed=seed, **kwargs)
             mode = method.split('_')[-1]
             vi = GaussianVI(log_prob=log_prob, map_estimate=initial_params,
-                            num_dims=self.dim, mode=mode, seed=seed, **kwargs)
-            return vi.optimize(num_samples, kwargs.get('maxiter', 1000))
+                            num_dims=self.search_space['dim'], mode=mode, seed=seed, **kwargs)
+            return vi.optimize(num_samples, kwargs.get('maxiter'))
         else:
             raise NotImplementedError()

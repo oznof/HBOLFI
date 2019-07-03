@@ -1,19 +1,21 @@
 from typing import Dict, Optional
-from functools import partial
+import math
 
 import torch
 import torch.nn
 
 from gpytorch.kernels import Kernel
 from gpytorch.priors import Prior
-from gpytorch import settings
+from gpytorch import settings as gpysettings
 
-from hbolfi import settings
+from .. import settings
+from ..utils import make_property
 from ..kernels import ScaleMaternKernel
 from ..distributions import DirichletPrior
 
 
 # based to some extent on the implementation in gpytorch.kernels.CylindricalKernel
+# IMPORTANT NOTE: we assume there is only one point at the origin (no repeats)
 class CylindricalKernel(Kernel):
     r"""
     Computes a covariance matrix based on the Cylindrical Kernel between
@@ -39,10 +41,14 @@ class CylindricalKernel(Kernel):
                  max_radius: float = 1.0, eps: float = 1e-6,
                  priors: Optional[Dict[str, Prior]] = None, **kwargs):
         super().__init__(has_lengthscale=False, **kwargs)
+        if 'active_dims' in kwargs:
+            max_radius = float(len(kwargs['active_dims'])) ** 0.5
         self.max_radius = max_radius
         self.num_angular_weights = num_angular_weights
         self.eps = eps
         self.radial_base_kernel = radial_base_kernel if radial_base_kernel else ScaleMaternKernel(nu=2.5)
+        if priors is None:
+            priors = {}
         angular_weights_prior = priors.get('angular_weights_prior', settings.angular_weights.prior())
         if isinstance(angular_weights_prior, DirichletPrior):
             num_angular_weights -= 1  # because it must be in simplex
@@ -52,70 +58,82 @@ class CylindricalKernel(Kernel):
         self.register_parameter(name="raw_beta", parameter=torch.nn.Parameter(torch.zeros(*self.batch_shape, 1)))
         self.set_priors(priors)
 
-    def _getter_p(self, k: str) -> torch.Tensor:  # unconstrained -> constrained
-        constraint = self._constraints.get(f"{k}_constraint")
-        return constraint.transform(getattr(self, k)) if constraint else getattr(self, k)
-
-    def _setter_p(self, v, k: str):  # constrained -> unconstrained
-        if not torch.is_tensor(v):
-            v = torch.as_tensor(v).to(getattr(self, k))
-        constraint = self._constraints.get(f"{k}_constraint")
-        self.initialize(**{k: constraint.inverse_transform(v) if constraint else v})
-
     # add attributes: constrained parameters
-    angular_weights = property(partial(_getter_p, k='raw_angular_weights'), partial(_setter_p, k='raw_angular_weights'))
-    alpha = property(partial(_getter_p, k='raw_alpha'), partial(_setter_p, k='raw_alpha'))
-    beta = property(partial(_getter_p, k='raw_beta'), partial(_setter_p, k='raw_beta'))
+    angular_weights = make_property('raw_angular_weights')
+    alpha = make_property('raw_alpha')
+    beta = make_property('raw_beta')
 
     def forward(self, x1: torch.Tensor, x2: torch.Tensor, diag: bool = False, **params) -> torch.Tensor:
-        x1_, x2_ = x1.clone(), x2.clone()
-        # Jitter datapoints that are exactly 0
-        x1_[torch.all(x1_ == 0, dim=-1)] += self.eps
-        x2_[torch.all(x2_ == 0, dim=-1)] += self.eps
-        r1 = x1_.norm(dim=-1, keepdim=True)
-        r2 = x2_.norm(dim=-1, keepdim=True)
+        r1 = torch.zeros(*x1.shape[:-1], 1)
+        r2 = torch.zeros(*x2.shape[:-1], 1)
+        mask_zero_1 = torch.all(x1 == 0, dim=-1)
+        mask_zero_2 = torch.all(x2 == 0, dim=-1)
+        mask_not_zero_1 = ~mask_zero_1
+        mask_not_zero_2 = ~mask_zero_2
+        r1[mask_not_zero_1] = x1[mask_not_zero_1, :].norm(dim=-1, keepdim=True)
+        r2[mask_not_zero_2] = x2[mask_not_zero_2, :].norm(dim=-1, keepdim=True)
+        r1[mask_zero_1] = x1[mask_zero_1, :].sum(dim=-1, keepdim=True) + self.eps
+        r2[mask_zero_2] = x2[mask_zero_2, :].sum(dim=-1, keepdim=True) + self.eps
 
         if torch.any(r1 > self.max_radius) or torch.any(r2 > self.max_radius):
             raise RuntimeError(f"Cylindrical kernel not defined for data points with radius > {self.max_radius}")
 
-        a1, a2 = x1.div(r1), x2.div(r2)
+        a1 = torch.zeros_like(x1)
+        a2 = torch.zeros_like(x2)
+        a1[mask_not_zero_1, :] = x1[mask_not_zero_1, :] / r1[mask_not_zero_1]
+        a2[mask_not_zero_2, :] = x2[mask_not_zero_2, :] / r2[mask_not_zero_2]
+        a1[mask_zero_1] = x1[mask_zero_1, :] + 1 / math.sqrt(x1.size(-1))
+        a2[mask_zero_2] = x2[mask_zero_2, :] + 1 / math.sqrt(x2.size(-1))
+
         if not diag:
             gram_mat = a1.matmul(a2.transpose(-2, -1))
-            for p in range(self.num_angular_weights):
-                if p == 0:
-                    angular_kernel = self.angular_weights[..., 0, None, None]
-                else:
-                    angular_kernel = angular_kernel + self.angular_weights[..., p, None, None].mul(gram_mat.pow(p))
+            gram_mat[mask_zero_1] = a2[torch.any(mask_zero_1, dim=-1)].mul(a2[torch.any(mask_zero_1, dim=-1)]).sum(-1)
+            gram_mat[mask_zero_2.unsqueeze(-2).expand(gram_mat.shape)] = a1[torch.any(mask_zero_2, dim=-1)].mul(
+                a1[torch.any(mask_zero_2, dim=-1)]).sum(-1).view(-1)
+
+            angular_kernel = self.angular_weights[..., 0, None, None]
+            for p in range(1, self.num_angular_weights):
+                angular_kernel = angular_kernel + self.angular_weights[..., p, None, None].mul(gram_mat.pow(p))
         else:
             gram_mat = a1.mul(a2).sum(-1)
-            for p in range(self.num_angular_weights):
-                if p == 0:
-                    angular_kernel = self.angular_weights[..., 0, None]
-                else:
-                    angular_kernel = angular_kernel + self.angular_weights[..., p, None].mul(gram_mat.pow(p))
+            gram_mat[mask_zero_1] = a2[mask_zero_1, :].mul(a2[mask_zero_1, :]).sum(-1)
+            gram_mat[mask_zero_2] = a1[mask_zero_2, :].mul(a1[mask_zero_2, :]).sum(-1)
 
-        with settings.lazily_evaluate_kernels(False):
+            angular_kernel = self.angular_weights[..., 0, None]
+            for p in range(1, self.num_angular_weights):
+                angular_kernel = angular_kernel + self.angular_weights[..., p, None].mul(gram_mat.pow(p))
+
+        with gpysettings.lazily_evaluate_kernels(False):
             radial_kernel = self.radial_base_kernel(self.kuma(r1), self.kuma(r2), diag=diag, **params)
         return radial_kernel.mul(angular_kernel)
 
     def kuma(self, x: torch.Tensor) -> torch.Tensor:
         alpha = self.alpha.view(*self.batch_shape, 1, 1)
         beta = self.beta.view(*self.batch_shape, 1, 1)
-        res = self.max_radius * (1 - (1 - x.div(self.max_radius).clamp(min=0, max=1).pow(alpha) + self.eps).pow(beta))
+        radii = (x / self.max_radius).clamp(min=self.eps, max=1)
+        res = self.max_radius * (1. - (1. - radii ** alpha + self.eps) ** beta)
         return res
 
     def num_outputs_per_input(self, x1: torch.Tensor, x2: torch.Tensor) -> int:
         return self.radial_base_kernel.num_outputs_per_input(x1, x2)
 
-    def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True):
+    def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True,
+                   without_initial_value=False):
         if priors is None:
             priors = {}
-        self.radial_base_kernel.set_priors(priors=priors, with_default=with_default)
+        self.radial_base_kernel.set_priors(priors=priors, with_default=with_default,
+                                           without_initial_value=without_initial_value)
         for name in ('angular_weights', 'alpha', 'beta'):
             name_prior = name + '_prior'
             raw_name = 'raw_' + name
             if with_default or name_prior in priors:
                 prior = priors.get(name_prior, getattr(settings, name).prior())
                 self.register_prior(name_prior, prior, lambda k=name: getattr(self, k),
-                                    lambda v, k=raw_name: self._setter_p(v, k))
+                                    lambda v, k=name: setattr(self, k, v))
+                if without_initial_value:
+                    init_value = prior.constraint.initial_value
+                    prior.constraint.initial_value = None
                 self.register_constraint(raw_name, prior.constraint)
+                if without_initial_value:
+                    prior.constraint.initial_value = init_value
+        return self

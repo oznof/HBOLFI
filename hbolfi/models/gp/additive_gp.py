@@ -49,7 +49,8 @@ class AdditiveStructureGPModel(ExactGPModel):
         return super().__call__(*args, **kwargs)
 
     def load_init(self):
-        self.kernel.set_priors(self.priors)
+        if self.priors:
+            self.kernel.set_priors(self.priors)
         super().load_init()
 
     def restrict(self, active_group: int):
@@ -65,3 +66,13 @@ class AdditiveStructureGPModel(ExactGPModel):
             self.kernel = self._orig_kernel
             self.mean.num_groups = None
             self.mean.active_dims = None
+
+    def clone(self):
+        if self.is_restricted:
+            raise RuntimeError("Cannot make clones while restricted. Call unrestrict first.")
+        _orig_kernel = self._orig_kernel
+        self._orig_kernel = None
+        new = super().clone()
+        self._orig_kernel = _orig_kernel
+        new._orig_kernel = new.kernel
+        return new

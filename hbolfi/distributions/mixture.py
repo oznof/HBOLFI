@@ -20,18 +20,15 @@ class Mixture(Distribution):
                 assert(supp_dict0.keys() == supp_dict1.keys())
                 for k in supp_dict0:
                     assert(torch.all(torch.as_tensor(supp_dict0[k] == supp_dict1[k])))
-        except:
-            raise ValueError("All base_dists must have the same support.")
+        except AssertionError:
+            raise RuntimeError("All base_dists must have the same support.")
         self.base_dists = list(base_dists)
         num_dists = len(base_dists)
         self._support = copy.deepcopy(self.base_dists[0].support)
         self.weights = weights if weights is not None else torch.ones(num_dists) / num_dists
         batch_shape = self.base_dists[0].batch_shape
         event_shape = self.base_dists[0].event_shape
-        #super().__init__(self, batch_shape=batch_shape, event_shape=event_shape, validate_args=False)
-        self._batch_shape = batch_shape
-        self._event_shape = event_shape
-        self._validate_args = False
+        Distribution.__init__(self, batch_shape=batch_shape, event_shape=event_shape, validate_args=False)
 
     @property
     def support(self):
@@ -109,4 +106,3 @@ class Mixture(Distribution):
     def __repr__(self):
         base_dist_names = ', '.join(OrderedDict({b.__class__.__name__: None for b in self.base_dists}).keys())
         return f"{self.__class__.__name__}(weights : {self.weights}, [{base_dist_names}])"
-

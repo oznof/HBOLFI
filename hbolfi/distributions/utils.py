@@ -32,15 +32,15 @@ def inverse_normal_cdf(value):
     return torch.erfinv(2 * value - 1) * math.sqrt(2)
 
 
-inv_gamma_cdf = lambda x, a, b: gammaincc(a, b / x)
+def inv_gamma_cdf(x, a, b):
+    return gammaincc(a, b / x)
 
 
 def invgamma_solver(l, u, method='minimize', verbose=False, show_plot=False):
     if method == 'minimize':
-        def fun(x):
-            a, b = x
-            lower_q = inv_gamma_cdf(l, a, b)
-            upper_q = inv_gamma_cdf(u, a, b)
+        def fun(p):
+            lower_q = inv_gamma_cdf(l, *p)
+            upper_q = inv_gamma_cdf(u, *p)
             return (lower_q - 0.01) ** 2 + (upper_q - 0.99) ** 2
 
         res = minimize(fun=fun, x0=np.ones(2), method='L-BFGS-B', jac=False, bounds=[(0, np.inf), (0, np.inf)])

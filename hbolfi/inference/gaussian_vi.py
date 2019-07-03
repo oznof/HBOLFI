@@ -8,6 +8,7 @@ from torch.distributions import biject_to, constraints, LowerCholeskyTransform
 from gpytorch.functions import add_jitter
 from gpytorch.distributions import MultivariateNormal
 
+from .. import settings
 from ..utils import hessian, rng
 from ..distributions import SoftPlusTransform
 
@@ -19,7 +20,7 @@ class GaussianVI:
                  num_dims: int,
                  num_groups: Optional[int] = None,
                  mode: str = 'oracle',
-                 seed: int = 117,
+                 seed: Optional[int] = None,
                  with_mean: bool = False,
                  bounds: Optional[torch.Tensor] = None,
                  **kwargs):
@@ -28,7 +29,7 @@ class GaussianVI:
             mode = 'diag'
         self.mode = mode
         self.log_prob = log_prob
-        self.rng_state = torch.Generator().manual_seed(seed).get_state()
+        self.rng_state = torch.Generator().manual_seed(seed).get_state() if seed is not None else torch.get_rng_state()
         self.num_dims = num_dims
         self.num_groups = num_groups
         self.dim_group = num_dims // num_groups
@@ -41,7 +42,10 @@ class GaussianVI:
             self.raw_mean = Parameter(self.transforms["mean"].inv(self.init_mean))
         x = self.init_mean.detach().clone().requires_grad_(True)
         h = hessian(lambda p: -log_prob(p), x)
-        covar = torch.cholesky_inverse(torch.cholesky(h, upper=True), upper=True)
+        try:
+            covar = torch.cholesky_inverse(torch.cholesky(h, upper=True), upper=True)
+        except RuntimeError:
+            covar = torch.cholesky_inverse(torch.cholesky(add_jitter(h, 1e-3), upper=True), upper=True)
         self.init_covar = covar
         chol = torch.cholesky(covar, upper=False)
         if self.mode == 'oracle':
@@ -66,7 +70,8 @@ class GaussianVI:
         if self.mode == 'oracle':
             diag = torch.diag(torch.ones(self.num_groups))
             chol = transform(self.raw_chol)
-            chol = torch.einsum("ab,cd->acbd", diag, chol).view(diag.size(0) * chol.size(0), diag.size(1) * chol.size(1))
+            chol = torch.einsum("ab,cd->acbd", [diag, chol]).view(diag.size(0) * chol.size(0),
+                                                                  diag.size(1) * chol.size(1))
         elif self.mode == 'diag':
             chol = transform(torch.diag(self.raw_chol))
         elif self.mode == 'partition':
@@ -87,24 +92,24 @@ class GaussianVI:
         try:
             q = MultivariateNormal(mean, covar)
         except RuntimeError:
-            q = MultivariateNormal(mean, add_jitter(covar, 1e-4))
+            q = MultivariateNormal(mean, add_jitter(covar, 1e-3))
         return q
 
-    def optimize(self, num_samples, maxiter):
+    def optimize(self, num_samples, maxiter=None):
+        maxiter = settings.default_maxiter.value() if maxiter is None else maxiter
 
         def func_and_grad(raw):
             raw = torch.tensor(raw).reshape(self.raw_chol.shape).clone().requires_grad_(True)
             self.raw_chol = raw
-            q = self.make_q()
-            base_samples = torch.randn(num_samples, q.mean.size(-1))
-            samples = q.rsample(base_samples=base_samples)
+            qi = self.make_q()
+            base_samples = torch.randn(num_samples, qi.mean.size(-1))
+            samples = qi.rsample(base_samples=base_samples)
             vals = self.log_prob(samples)
-            loss = -q.entropy() - torch.mean(vals)
+            loss = -qi.entropy() - torch.mean(vals)
             curr_loss = loss.item()
             loss.backward()
-            # print(-torch.mean(vals))
             # print(f"loss={curr_loss}")
-            # print(q.covariance_matrix)
+            # print(qi.covariance_matrix)
             return [curr_loss, raw.grad.clone().numpy().flatten()]
 
         raw_param = self.raw_chol.detach().flatten()

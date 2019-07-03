@@ -50,10 +50,10 @@ class HalfStudentT(TransformedDistribution):
 
     @property
     def mean(self):
-        m = self.loc.clone()
+        m = self.base_dist.loc.clone()
         idx = self.df > 1
-        m[idx] = 2 * self.scale[idx] * torch.sqrt(self.df[idx] / math.pi) * (1 /  (self.df[idx] - 1) *
-                 torch.exp(torch.lgamma((self.df[idx] + 1) / 2.) - torch.lgamma(self.df[idx] / 2)))
+        m[idx] = 2 * self.scale[idx] * torch.sqrt(self.df[idx] / math.pi) * (1 / (self.df[idx] - 1) * torch.exp(
+            torch.lgamma((self.df[idx] + 1) / 2.) - torch.lgamma(self.df[idx] / 2)))
         m[1 - idx] = float('nan')
         return m
 

@@ -45,6 +45,14 @@ class Constraint(Module):
         return self._support.__repr__()
 
 
+class _InitializePrior(object):
+    def __call__(self, *args):
+        obj = _InitializePrior()
+        prior = make_prior(*args)
+        obj.__class__ = prior.__class__ if isinstance(prior, Distribution) else prior
+        return obj
+
+
 def make_prior(cls_or_inst: Union[Type[Distribution], Distribution],
                initial_value: Optional[Union[torch.Tensor, Number]] = None) -> Prior:
     isinst = isinstance(cls_or_inst, torch.distributions.Distribution)
@@ -58,8 +66,13 @@ def make_prior(cls_or_inst: Union[Type[Distribution], Distribution],
         self._transform = transform
         # the following allows to define gpytorch.constraints only using the support of the chosen prior
         self.constraint = Constraint(support=support, initial_value=initial_value)
+        # make the reduce op easier by storing arg
+        self._cls_or_inst = cls_or_inst
 
-    cls_prior = type(f"{cls.__name__}Prior", (Prior, cls), {'__init__': __init__})
+    def __reduce__(self):
+        return _InitializePrior(), (self._cls_or_inst, self.constraint.initial_value), self.__dict__
+
+    cls_prior = type(f"{cls.__name__}Prior", (Prior, cls), {'__init__': __init__, '__reduce__': __reduce__})
     cls_prior.support = support
     if isinst:  # create instance
         params = cls_or_inst.__init__.__code__.co_varnames[:cls_or_inst.__init__.__code__.co_argcount]
@@ -83,7 +96,7 @@ DirichletPrior = make_prior(Dirichlet)
 DeltaPrior = make_prior(Delta)
 
 
-def SpikeUniformSlabPrior(mean, low, high, spike_scale=torch.tensor([0.01]), initial_value=None):
+def SpikeUniformSlabPrior(mean, low, high, spike_scale=torch.tensor(0.01), initial_value=None):
     spike = TruncatedNormal(loc=mean, scale=spike_scale, low=low, high=high)
     slab = Uniform(low=low, high=high)
     if initial_value is None:
@@ -91,7 +104,7 @@ def SpikeUniformSlabPrior(mean, low, high, spike_scale=torch.tensor([0.01]), ini
     return make_prior(Mixture([spike, slab]), initial_value=initial_value)
 
 
-def SpikeNormalSlabPrior(mean, low, high, spike_scale=torch.tensor([0.01]), slab_scale=None, initial_value=None):
+def SpikeNormalSlabPrior(mean, low, high, spike_scale=torch.tensor(0.01), slab_scale=None, initial_value=None):
     if slab_scale is None:
         slab_scale = 3 * spike_scale
     spike = TruncatedNormal(loc=mean, scale=spike_scale, low=low, high=high)

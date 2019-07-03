@@ -1,4 +1,4 @@
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Union
 
 import torch
 from torch import multiprocessing
@@ -8,7 +8,7 @@ from pyro.ops.stats import effective_sample_size, split_gelman_rubin
 
 
 def nuts(potential_fn: Callable[[Dict[str, torch.Tensor]], torch.Tensor],
-         transforms: Dict[str, torch.Tensor],
+         transforms: Optional[Dict[str, torch.Tensor]] = None,
          num_samples: int = 5000,
          initial_params: Optional[Dict[str, torch.Tensor]] = None,
          num_chains: int = 1,
@@ -27,7 +27,8 @@ def nuts(potential_fn: Callable[[Dict[str, torch.Tensor]], torch.Tensor],
          max_tree_depth: int = 10,
          mp_context: Optional[str] = None,
          disable_progbar: bool = False,
-         **kwargs) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+         **kwargs) -> Union[Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor], Dict[str, torch.Tensor]],
+                            Tuple[Dict[str, torch.Tensor]]]:
     nuts_kernel = NUTS(model=None, potential_fn=potential_fn, transforms=transforms,
                        step_size=step_size, adapt_step_size=adapt_step_size,
                        adapt_mass_matrix=adapt_mass_matrix, full_mass=full_mass,
@@ -50,7 +51,12 @@ def nuts(potential_fn: Callable[[Dict[str, torch.Tensor]], torch.Tensor],
     if num_chains > 1 and seed is not None:
         torch.initial_seed = torch_initial_seed_func
     samples_dict, ess_dict, rhat_dict = {}, {}, {}
-    for param_name in transforms:
+    get_exec_traces = kwargs.pop('get_exec_traces')
+    if get_exec_traces:
+        return mcmc_run.exec_traces
+    # must provide one of the two
+    param_names = transforms.keys() if transforms else initial_params.keys()
+    for param_name in param_names:
         samples = torch.stack([trace[param_name] for trace in mcmc_run.exec_traces])
         if num_chains == 1:
             samples = samples.unsqueeze(0)

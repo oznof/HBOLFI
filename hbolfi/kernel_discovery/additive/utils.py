@@ -20,7 +20,8 @@ def generate_kernel_list(num_groups: int, num_dims: int, generator: Optional[tor
     k_list = []
     for v in torch.unique(z):
         active_dims = torch.nonzero(z == v).squeeze()
-        if active_dims.numel():
-            k = kernel(active_dims=active_dims, ard_num_dims=(active_dims.numel() if ard else None))
+        len_active = active_dims.numel()
+        if len_active:
+            k = kernel(active_dims=active_dims, ard_num_dims=len_active if ard else None)
             k_list.append(k)
     return k_list
