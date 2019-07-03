@@ -97,7 +97,7 @@ class TruncatedNormal(Distribution):
     def sample(self, sample_shape=torch.Size(), generator=None):
         shape = self._extended_shape(sample_shape)
         with torch.no_grad():
-            if generator:  # rand throws TypeError if generator is None
+            if generator:  # rand throws TypeError when generator is None
                 rand = torch.rand(shape, dtype=self.loc.dtype, device=self.loc.device, generator=generator)
             else:
                 rand = torch.rand(shape, dtype=self.loc.dtype, device=self.loc.device)
@@ -105,7 +105,7 @@ class TruncatedNormal(Distribution):
 
     def rsample(self, sample_shape=torch.Size(), generator=None):
         shape = self._extended_shape(sample_shape)
-        if generator:  # rand throws TypeError if generator is None
+        if generator:  # rand throws TypeError when generator is None
             rand = torch.rand(shape, dtype=self.loc.dtype, device=self.loc.device, generator=generator)
         else:
             rand = torch.rand(shape, dtype=self.loc.dtype, device=self.loc.device)

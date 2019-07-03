@@ -112,7 +112,6 @@ class TestPrior(unittest.TestCase):
                     # constraint objects are tied to instances, despite support being shared
                     self.assertTrue(prior.constraint != prev_prior.constraint)
                 prev_prior = prior
-
             init0 = torch.tensor(1.)
             init1 = torch.tensor(2.1234)
             init2 = torch.tensor(117.711)
