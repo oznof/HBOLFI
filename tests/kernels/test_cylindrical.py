@@ -18,7 +18,7 @@ from hbolfi import CylindricalKernel, make_gp
 from hbolfi import settings, rng
 from hbolfi.simulators import Levy
 
-SEED = 110
+SEED = 117
 
 
 # HyperSphere computes the nll in a different way, see the comments in original_negative_log_likelihood
@@ -104,7 +104,7 @@ def original_negative_log_likelihood(self, hyper=None):
     return nll
 
 
-inf_origin.negative_log_likelihood = original_negative_log_likelihood
+# inf_origin.negative_log_likelihood = original_negative_log_likelihood
 
 
 class TestCylindricalKernel(unittest.TestCase):
@@ -154,7 +154,7 @@ class TestCylindricalKernel(unittest.TestCase):
         gram_2 = k2(x1, x2)
         return torch.allclose(gram_1, gram_2)
 
-    def qtest_cylindrical_kernel(self):
+    def test_cylindrical_kernel(self):
         dims = [4, 8, 12, 16, 20]
         outputscales = [torch.tensor([1.17]), torch.tensor([2.13])]
         lengthscales = [torch.tensor([1.17]), torch.tensor([2.13])]
@@ -236,7 +236,7 @@ class TestCylindricalKernel(unittest.TestCase):
                         self.assertTrue(torch.allclose(nll2, nll2_alt))
                 self.assertTrue(times[1] - times[0] > 0)
 
-    def test_predict(self, verbose=True):
+    def test_predict(self, verbose=False):
         dim = 20
         reps = 10
         outputscale = torch.tensor([1.71])
