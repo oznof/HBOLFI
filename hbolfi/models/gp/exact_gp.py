@@ -10,6 +10,7 @@ import scipy.optimize
 
 import torch
 from torch.distributions import Transform
+import gpytorch
 from gpytorch.models import ExactGP
 from gpytorch.means import Mean
 from gpytorch.kernels import Kernel
@@ -24,6 +25,7 @@ from ... import settings
 from ...means import QuadPolyMean
 # TODO: REMOVE THIS
 from ...kernels import ScaleRBFKernel, CylindricalKernel
+from ...kernels.cylindrical import original_prediction_strategy_cylindrical, original_training_strategy_cylindrical
 
 
 class ExactGPModel(ExactGP, SurrogateModel):
@@ -61,12 +63,62 @@ class ExactGPModel(ExactGP, SurrogateModel):
         self.maxiter = optimizer_options.get('maxiter', maxiter)
         self.to_centered_cube_transform = to_centered_cube_transform
         self.optimizer_options = optimizer_options
-        self.log_likelihood = None  # only updated, when optimize is called
+        self.log_likelihood = None  # only updated, when fitted
 
-    def forward(self, x: torch.Tensor) -> MultivariateNormal:
+    def __call__(self, *args, **kwargs):
+        if isinstance(self.kernel, CylindricalKernel):
+            if self.train_inputs is not None and self.train_targets is not None:
+                if self.training:
+                    inputs = args[0]
+                    train_inputs = self.train_inputs[0]
+                    mask_zero = torch.all(train_inputs == 0, dim=-1)
+                    has_zero = torch.any(mask_zero)
+                    if has_zero:
+                        self.prediction_strategy = None
+                        # not supporting batches yet
+                        assert(train_inputs.ndim == 2)
+                        assert(torch.equal(train_inputs, inputs))
+                        if settings.cylindrical_original_training_strategy.off():
+                            means = []
+                            covariances = []
+                            for i, x in enumerate(train_inputs[~mask_zero]):
+                                x = x.view(1, -1)
+                                mvn = super().__call__(*args, xtest=x, **kwargs)
+                                means.append(mvn.mean)
+                                covariances.append(mvn.covariance_matrix)
+                            mean = torch.stack(means).mean(0)
+                            covariance = torch.stack(covariances).mean(0)
+                            return MultivariateNormal(mean, covariance)
+                        else:
+                            return original_training_strategy_cylindrical(self, train_inputs)
+                elif gpytorch.settings.prior_mode.off():
+                    if settings.cylindrical_original_prediction_strategy.off():
+                        # posterior mode and CylindricalKernel
+                        # cannot use caches (prediction_strategy)
+                        # must set train_train_covar based on test_points
+                        # NOTE: Only computes variances (not covariances) and assuming 2D inputs (slow version)
+                        inputs = list(args[0].view(-1, self.train_inputs[0].size(-1)))
+                        mean = torch.zeros(len(inputs))
+                        variance = torch.zeros(len(inputs))
+                        for i, xtest in enumerate(inputs):
+                            self.prediction_strategy = None
+                            xtest = xtest.view(1, -1)
+                            mvn = super().__call__(xtest, xtest=xtest, **kwargs)
+                            mean[i] = mvn.mean
+                            variance[i] = mvn.variance
+                        return MultivariateNormal(mean, torch.diag(variance))
+                    else:
+                        # use this method by default
+                        # original prediction method provided by HyperSphere (CylindricalKernel)
+                        # was extended to compute covariances
+                        return original_prediction_strategy_cylindrical(self,
+                                                                        args[0].view(-1, self.train_inputs[0].size(-1)))
+        return super().__call__(*args, **kwargs)
+
+    def forward(self, x: torch.Tensor, **kwargs) -> MultivariateNormal:
         x_transf = x if self.to_centered_cube_transform is None else self.to_centered_cube_transform(x)
         mean_x = self.mean(x_transf)
-        covar_x = self.kernel(x_transf)
+        covar_x = self.kernel(x_transf, **kwargs)
         return MultivariateNormal(mean_x, covar_x)
 
     def load_init(self):
@@ -193,12 +245,22 @@ class ExactGPModel(ExactGP, SurrogateModel):
                 i += v.numel()
 
     def get_fantasy_model(self, inputs, targets, **kwargs):
-        model = ExactGP.get_fantasy_model(self, inputs, targets, **kwargs)
-        # fix some bad references that happen inside get_fantasy_model
-        model.likelihood.set_priors(self.priors, without_initial_value=True)
-        model.prediction_strategy.likelihood = model.likelihood
-        model.kernel.set_priors(model.priors, without_initial_value=True)
-        model.mean.set_priors(model.priors, without_initial_value=True)
+        if isinstance(self.kernel, CylindricalKernel):
+            # NOTE: do not call ExactGP.get_fantasy_model for CylindricalKernel
+            # prediction_strategy will be reset
+            # this is used to store L_not0_not0 if settings.cylindrical_original_pred_method.on(),
+            # see kernels.CylindricalKernel
+            model = self.clone()
+            train_inputs = torch.cat([self.model.train_inputs[0], inputs])
+            train_targets = torch.cat([self.model.train_targets, targets])
+            model.set_train_data(inputs=train_inputs, targets=train_targets, strict=False)
+        else:
+            model = ExactGP.get_fantasy_model(self, inputs, targets, **kwargs)
+            # fix some bad references that happen inside get_fantasy_model
+            model.likelihood.set_priors(self.priors, without_initial_value=True)
+            model.prediction_strategy.likelihood = model.likelihood
+            model.kernel.set_priors(model.priors, without_initial_value=True)
+            model.mean.set_priors(model.priors, without_initial_value=True)
         return model
 
     def clone(self):

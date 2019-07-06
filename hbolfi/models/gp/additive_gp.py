@@ -2,6 +2,7 @@
 from typing import List
 
 import torch
+import gpytorch
 from gpytorch.kernels import AdditiveKernel
 from gpytorch.models.exact_prediction_strategies import prediction_strategy
 
@@ -32,7 +33,8 @@ class AdditiveStructureGPModel(ExactGPModel):
     def __call__(self, *args, **kwargs):
         # if model is restricted and in posterior mode, get unrestricted model to precompute train_train_covar
         if self.is_restricted and not self.training and \
-           (self.train_inputs is not None and self.train_targets is not None):  # restricted and posterior mode
+           gpytorch.settings.prior_mode.off() and self.train_inputs is not None \
+           and self.train_targets is not None:  # restricted and posterior mode
             train_inputs = self.train_inputs
             # if prediction_strategy has not yet been set, get unrestricted model to precompute train_train_covar
             if self.prediction_strategy is None:  # is set to None after each set_train_data

@@ -5,7 +5,7 @@ from .priors import quadpoly_a, quadpoly_b, quadpoly_c
 from .optim import initialize_before_optimization, initialize_by_sampling
 from .optim import default_optimizer, torch_optimizers, default_torch_optimizer_options
 from .optim import default_n_inits, default_maxiter, default_acquisition_noise, default_n_candidates
-
+from .misc import cylindrical_original_training_strategy, cylindrical_original_prediction_strategy
 
 __all__ = [
     # PRIORS
@@ -33,5 +33,9 @@ __all__ = [
     "default_maxiter",
     # acquisition only default values
     "default_acquisition_noise",
-    "default_n_candidates"
+    "default_n_candidates",
+    # MISC
+    # context managers
+    "cylindrical_original_training_strategy",
+    "cylindrical_original_prediction_strategy"
 ]

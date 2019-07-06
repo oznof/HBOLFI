@@ -110,7 +110,7 @@ class Levy:
         self.partition = list(torch.arange(self.ndim))  # fully additive
 
     def eval(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.view(1, self.ndim)
+        x = x.view(-1, self.ndim)
         x = x * 10.0
         w = (x - 1.0) / 4.0 + 1.0
         output = torch.sin(math.pi * w[:, :1]) ** 2.0

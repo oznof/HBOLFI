@@ -11,7 +11,6 @@ from ..distributions import InvGammaPrior, StudentTPrior, HalfStudentTPrior, Dir
 from ..distributions import make_prior, DeltaPrior, NormalPrior, HalfNormalPrior, ShiftedHalfNormal
 from ..distributions import TruncatedNormal, SpikeNormalSlabPrior, ShiftedInvGamma, invgamma_solver
 
-torch.set_default_dtype(torch.float64)
 
 default_prior_names = ('noise', 'lengthscale', 'outputscale', 'angular_weights', 'alpha', 'beta',
                        'quadpoly_a', 'quadpoly_b', 'quadpoly_c')

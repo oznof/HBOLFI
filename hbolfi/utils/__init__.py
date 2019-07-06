@@ -4,7 +4,7 @@ from .plotting import plot_contour
 from .metrics import partition_metrics, summary_stats
 from .patches import sample_from_prior, _extract_named_priors, _load_raw_parameters, psd_safe_cholesky
 from .patches import register_constraint, exact_predictive_covar, interval_transform, interval_inverse_transform
-from .patches import gaussian_likelihood_set_priors
+from .patches import gaussian_likelihood_set_priors, gaussian_likelihood_call, exact_mll_forward
 from .property import make_property
 
 __all__ = [
@@ -21,6 +21,8 @@ __all__ = [
     "interval_transform",
     "interval_inverse_transform",
     "gaussian_likelihood_set_priors",
+    "gaussian_likelihood_call",
+    "exact_mll_forward",
     "psd_safe_cholesky",
     "make_property"
 ]

@@ -10,14 +10,16 @@ from hbolfi.distributions.priors import Constraint
 from hbolfi.utils import rng
 from hbolfi import settings
 
-
-STATE = torch.Generator().manual_seed(117).get_state()
+SEED = 117
 
 
 class TestPrior(unittest.TestCase):
+    def setUp(self):
+        self.state = torch.Generator().manual_seed(SEED).get_state()
+
     def test_make_prior_on_class(self):
         sample_shape = (100,)
-        with rng(STATE):
+        with rng(self.state):
             a1 = torch.abs(torch.randn(4)) + 2
             b1 = a1 + 1.117 * torch.randn(4)
             a2 = torch.abs(torch.randn(4)) + 3
@@ -27,10 +29,10 @@ class TestPrior(unittest.TestCase):
         u2 = InvGamma(a2, b2)
         p1 = InvGammaPrior(a1, b1, initial_value=init_p1)
         p2 = InvGammaPrior(a2, b2, initial_value=init_p2)
-        with rng(STATE):
+        with rng(self.state):
             samples_u1 = u1.sample(sample_shape)
             samples_u2 = u2.sample(sample_shape)
-        with rng(STATE):
+        with rng(self.state):
             samples_p1 = p1.sample(sample_shape)
             samples_p2 = p2.sample(sample_shape)
         self.assertTrue(p1.__class__ == p2.__class__)
@@ -69,10 +71,10 @@ class TestPrior(unittest.TestCase):
                     u2 = Mixture([spike2, slab2])
                     p1 = SpikeUniformSlabPrior(mean=init_u1, low=lb_u1, high=ub_u1)
                     p2 = SpikeUniformSlabPrior(mean=init_u2, low=lb_u2, high=ub_u2)
-                with rng(STATE):
+                with rng(self.state):
                     samples_u1 = u1.sample(sample_shape)
                     samples_u2 = u2.sample(sample_shape)
-                with rng(STATE):
+                with rng(self.state):
                     samples_p1 = p1.sample(sample_shape)
                     samples_p2 = p2.sample(sample_shape)
                 # prior class is not the same when calling make_prior on instances
@@ -112,6 +114,7 @@ class TestPrior(unittest.TestCase):
                     # constraint objects are tied to instances, despite support being shared
                     self.assertTrue(prior.constraint != prev_prior.constraint)
                 prev_prior = prior
+
             init0 = torch.tensor(1.)
             init1 = torch.tensor(2.1234)
             init2 = torch.tensor(117.711)

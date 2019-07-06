@@ -19,7 +19,7 @@ import gpytorch.constraints
 import gpytorch.models.exact_prediction_strategies
 from .utils import sample_from_prior, register_constraint, _load_raw_parameters, psd_safe_cholesky
 from .utils import exact_predictive_covar, interval_transform, interval_inverse_transform, _extract_named_priors
-from .utils import gaussian_likelihood_set_priors
+from .utils import gaussian_likelihood_set_priors, gaussian_likelihood_call, exact_mll_forward
 gpytorch.module.Module.sample_from_prior = sample_from_prior
 gpytorch.module._extract_named_priors = _extract_named_priors
 gpytorch.module.Module._load_raw_parameters = _load_raw_parameters
@@ -30,8 +30,10 @@ gpytorch.constraints.Interval.inverse_transform = interval_inverse_transform
 gpytorch.likelihoods.GaussianLikelihood.set_priors = gaussian_likelihood_set_priors
 gpytorch.utils.cholesky.psd_safe_cholesky = psd_safe_cholesky
 gpytorch.lazy.lazy_tensor.psd_safe_cholesky = psd_safe_cholesky
+gpytorch.likelihoods.GaussianLikelihood.__call__ = gaussian_likelihood_call
+gpytorch.mlls.ExactMarginalLogLikelihood.forward = exact_mll_forward
 
-__version__ = "0.6"
+__version__ = "0.7"
 
 __all__ = [
     "AcquisitionFunction",

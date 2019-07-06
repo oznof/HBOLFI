@@ -6,6 +6,7 @@ import gpytorch
 from gpytorch.constraints import Interval
 
 from .. import settings
+from ..distributions import TrainingDistribution
 
 
 # gpytorch.module.Module.sample_from_prior does not take into consideration the sample shape
@@ -86,6 +87,38 @@ def gaussian_likelihood_set_priors(self, priors=None, with_default=True, without
         if without_initial_value:
             prior.constraint.initial_value = init_value
     return self
+
+
+def gaussian_likelihood_call(self, input, *params, **kwargs):
+    if isinstance(input, TrainingDistribution):
+        return input
+    return gpytorch.likelihoods.Likelihood.__call__(self, input, *params, **kwargs)
+
+
+# hack: allow other general training distributions through a mock distribution, TrainingDistribution
+def exact_mll_forward(self, output, target, *params):
+    if not isinstance(output, torch.distributions.MultivariateNormal) and \
+       not isinstance(output, TrainingDistribution):
+        raise RuntimeError("ExactMarginalLogLikelihood can only operate on Gaussian random variables")
+
+    # Get the log prob of the marginal distribution
+    output = self.likelihood(output, *params)
+    res = output.log_prob(target)
+
+    # Add terms for SGPR / when inducing points are learned
+    added_loss = torch.zeros_like(res)
+    for added_loss_term in self.model.added_loss_terms():
+        added_loss = added_loss.add(added_loss_term.loss())
+
+    res = res.add(0.5, added_loss)
+
+    # Add log probs of priors on the (functions of) parameters
+    for name, prior, closure, _ in self.named_priors():
+        res.add_(prior.log_prob(closure()).sum())
+
+    # Scale by the amount of data we have
+    num_data = target.size(-1)
+    return res.div_(num_data)
 
 
 # the problem appears in inv_matmul when trying to compute second order derivatives
