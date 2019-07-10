@@ -77,6 +77,10 @@ class AcquisitionFunction(Module):
             else:
                 raise RuntimeError("Invalid optimizer for AcquisitionFunction.")
         self.optimizer_options = optimizer_options
+        # other options related to random restarts
+        self.fix_sobol = kwargs.pop('fix_sobol', settings.default_fix_sobol.on())
+        self.perturb_optimum = kwargs.pop('perturb_optimum', settings.default_perturb_optim.on())
+        self.include_inputs = kwargs.pop('include_inputs', settings.default_include_inputs.on())
         self.t = torch.zeros(1)
 
     def evaluate(self, x: torch.Tensor) -> torch.Tensor:
@@ -138,7 +142,8 @@ class AcquisitionFunction(Module):
         val = self.evaluate(loc).item()
         return loc, val
 
-    def generate_candidates(self, guess_point: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def generate_candidates(self, guess_point: Optional[torch.Tensor] = None,
+                            verbose: bool = False) -> torch.Tensor:
         with rng(self.rng_state) as rs:
             c = 0
             if self.dim is None:  # must provide guess_point, or it will break here
@@ -154,7 +159,8 @@ class AcquisitionFunction(Module):
             while c < self.n_inits:
                 if generate_sobol:
                     # generate sobol the first time
-                    x = SobolEngine(self.dim).draw(self.n_candidates).to(torch.get_default_dtype())
+                    n_skip = 0 if self.fix_sobol else torch.randint(self.n_candidates, (1,)).item()
+                    x = SobolEngine(self.dim).draw(self.n_candidates + n_skip).to(torch.get_default_dtype())[n_skip:]
                     generate_sobol = False
                 elif c == 0 or iters < 10 or torch.rand(1) < 0.5:
                     # keep generating random unif until a valid starting point is found or number of iterations < 10
@@ -165,7 +171,32 @@ class AcquisitionFunction(Module):
                     x = self.transforms['from_cube'].inv(x0[:c]) + torch.randn(c, self.dim) * 0.01
                     x = torch.min(torch.max(x, torch.zeros(1)), torch.ones(1))  # clip wrt bounds of unit cube
                 x = self.transforms['from_cube'](x)
-                val = self.evaluate(x)
+                if c <= 1 and hasattr(self.model, 'train_inputs'):
+                    if self.perturb_optimum and 'bounds' in self.search_space:
+                        x_opt = self.model.train_inputs[0][torch.argmin(self.model.train_targets)]
+                        lb, ub = self.search_space['bounds']
+                        x_spray = x_opt + torch.randn(10, x_opt.numel()) * 0.001 * (ub - lb)
+                        out_bounds = x_spray < lb
+                        x_spray[out_bounds] = 2 * lb.expand(10, self.dim)[out_bounds] - x_spray[out_bounds]
+                        out_bounds = x_spray > ub
+                        x_spray[out_bounds] = 2 * ub.expand(10, self.dim)[out_bounds] - x_spray[out_bounds]
+                        x = torch.cat([x, x_spray], -2)
+                    if self.include_inputs:
+                        x = torch.cat([x, self.model.train_inputs[0]], -2)
+                x_size = x.size(0)
+                i = 0
+                val = []
+                chunk_size = settings.evaluate_chunk_size.value()
+                if chunk_size is None:
+                    chunk_size = x_size
+                start = time()
+                if verbose:
+                    print(f"Evaluating candidates (iter={iters})...", end='')
+                while i < x_size:
+                    x_chunk = x[i:i+chunk_size]
+                    val.append(self.evaluate(x_chunk))
+                    i += x_chunk.size(0)
+                val = torch.cat(val)
                 ids = torch.argsort(val)[:self.n_inits - c]
                 val = val[ids]
                 mask_keep = (val == val) & (val != float('inf'))  # remove nan and inf
@@ -174,15 +205,16 @@ class AcquisitionFunction(Module):
                 if len_ids > 0:
                     x0[c:c+len_ids] = x[ids]
                     c += len_ids
+                if verbose:
+                    print(f"Done. Gathered: {c}/{self.n_inits}. time={time() - start:.3f}")
                 iters += 1
         self.rng_state = rs.generator_or_state
         return x0
 
     def acquire(self, n: int = 1, guess_point: Optional[torch.Tensor] = None,
-                retain_graph: bool = False,
-                verbose: bool = False) -> Tuple[torch.Tensor, Union[float, torch.Tensor]]:
+                retain_graph: bool = False, verbose: bool = False) -> Tuple[torch.Tensor, Union[float, torch.Tensor]]:
         self.t += 1
-        x0 = self.generate_candidates(guess_point)
+        x0 = self.generate_candidates(guess_point, verbose=verbose)
         # print("guess_point: ",  guess_point)
         # print("candidates (orig): ", x0)
         loc = torch.zeros_like(x0)
@@ -191,7 +223,7 @@ class AcquisitionFunction(Module):
         for i, xi in enumerate(x0):
             loc[i], val[i] = self.optimize(xi, retain_graph=retain_graph)
         if verbose:
-            print(f"total time in acquisition: {time() - start}")
+            print(f"Time in optimize: {time() - start}")
         i = torch.argmin(val)
         xbest = loc[i]
         valbest = val[i].item()

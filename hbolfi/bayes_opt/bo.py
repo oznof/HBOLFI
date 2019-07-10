@@ -12,8 +12,9 @@ import gpytorch
 
 from ..acquisitions import AcquisitionFunction, LCB, LCBAdd
 from ..distributions import biject_to
-from ..models import SurrogateModel
-from ..utils import rng
+from ..models import SurrogateModel, BayesianGPModel
+from ..utils import rng, normalize
+from .. import settings
 
 
 class BayesianOptimization(Module):
@@ -28,7 +29,8 @@ class BayesianOptimization(Module):
                  acquisition_options: Optional[Dict[str, Any]] = None,
                  seed:                Optional[int] = None,
                  prior:               Optional[Distribution] = None,
-                 set_cube_transform:  bool = False):
+                 set_cube_transform:  bool = False,
+                 normalize_targets:   bool = False):
         super().__init__()
         self.obj_function = obj_function
         self.model = model
@@ -43,17 +45,25 @@ class BayesianOptimization(Module):
         search_space['from_real'] = from_real
         search_space['from_cube'] = from_cube
         self.prior = prior
+        # TODO: Check whether it makes sense to refactor this
         # this allows the model to apply a transformation to the inputs of the kernel
         if set_cube_transform and hasattr(model, 'to_centered_cube_transform'):
             transform = ComposeTransform([from_real.inv, SigmoidTransform(), AffineTransform(-1, 2, 0)])
             model.to_centered_cube_transform = transform
         self.transforms = {p: v for p, v in search_space.items() if p in ('from_cube', 'from_real')}
         self.search_space = search_space
-        if isinstance(train_inputs, torch.Tensor) and isinstance(train_targets, torch.Tensor):
+        self.normalize_targets = normalize_targets or settings.bo_normalize_targets.on()
+        if isinstance(train_inputs, torch.Tensor):
+            if not isinstance(train_targets, torch.Tensor):
+                train_targets = torch.as_tensor(self.obj_function(train_inputs)).view(-1)
             assert(train_inputs.size(0) == train_targets.numel())
-            self.model.set_train_data(inputs=train_inputs, targets=train_targets, strict=False)
         elif initial_samples > 0:
             train_inputs, train_targets = self.get_train_data(initial_samples)
+        self.train_inputs = train_inputs
+        self.train_targets = train_targets
+        if train_inputs is not None and train_targets is not None:
+            if self.normalize_targets:
+                train_targets = normalize(train_targets, mode='moment')
             self.model.set_train_data(inputs=train_inputs, targets=train_targets, strict=False)
         self.seed = seed
         self.rng_state = (torch.get_rng_state() if self.seed is None else
@@ -66,15 +76,17 @@ class BayesianOptimization(Module):
 
     @property
     def dim(self):
-        return self.model.train_inputs[0].size(-1)
+        if not hasattr(self, 'train_inputs'):
+            if 'dim' in self.search_space:
+                return self.search_space['dim']
+            if 'bounds' in self.search_space:
+                return self.search_space['bounds'].size(-1)
+            raise RuntimeError("Unknown number of dimensions.")
+        else:
+            return self.train_inputs.size(-1)
 
     def get_train_data(self, initial_samples: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        if 'dim' in self.search_space:
-            dim = self.search_space['dim']
-        elif 'bounds' in self.search_space:
-            dim = self.search_space['bounds'].size(1)
-        else:
-            raise RuntimeError("Unknown number of dimensions.")
+        dim = self.dim
         if dim <= 1111:
             inputs = SobolEngine(dim).draw(initial_samples)
         else:
@@ -89,15 +101,21 @@ class BayesianOptimization(Module):
              model_modifier: Optional[Callable[[], SurrogateModel]] = None,
              verbose: bool = False, linear_update: bool = False):
         if acquire:
-            guess_point = self.model.train_inputs[0][torch.argmin(self.model.train_targets)]
-            new_input, _ = self.acquisition.acquire(guess_point=guess_point, retain_graph=linear_update)
+            retain_graph = True if linear_update or isinstance(self.model, BayesianGPModel) else False
+            new_input, _ = self.acquisition.acquire(retain_graph=retain_graph, verbose=verbose)
             new_target = torch.as_tensor([self.obj_function(new_input)])
             if not linear_update:
-                train_inputs = torch.cat([self.model.train_inputs[0], new_input.view(1, -1)])
-                train_targets = torch.cat([self.model.train_targets, new_target])
-                self.model.set_train_data(inputs=train_inputs, targets=train_targets, strict=False)
+                self.train_inputs = torch.cat([self.train_inputs, new_input.view(1, -1)])
+                self.train_targets = torch.cat([self.train_targets, new_target])
+                if self.normalize_targets:
+                    train_targets = normalize(self.train_targets, mode='moment')
+                self.model.set_train_data(inputs=self.train_inputs, targets=train_targets, strict=False)
             else:
+                if self.normalize_targets:
+                    raise RuntimeError("Can't do linear updates with normalize_targets=True.")
                 self.model = self.model.get_fantasy_model(new_input.view(1, -1), new_target.view(-1))
+                self.train_inputs = self.model.train_inputs[0]
+                self.train_targets = self.model.train_targets
                 self.acquisition.model = self.model  # sync model
         if fit or model_modifier:
             # some models rely on random sampling from priors (see ExactGP.load_init())
@@ -114,7 +132,7 @@ class BayesianOptimization(Module):
             acq_class = LCB
         acquisition = acq_class(model=self.model, search_space=self.search_space, beta=torch.zeros(1),
                                 seed=self.seed, **self.acquisition_options)
-        guess_point = self.model.train_inputs[0][torch.argmin(self.model.train_targets)]
+        retain_graph = True if isinstance(self.model, BayesianGPModel) else False
         with gpytorch.settings.skip_posterior_variances(True):
-            xmin, valmin = acquisition.acquire(guess_point=guess_point)
+            xmin, valmin = acquisition.acquire(retain_graph=retain_graph)
         return xmin, valmin

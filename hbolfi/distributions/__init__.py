@@ -1,3 +1,4 @@
+from .constraint import Constraint
 from .truncated_normal import TruncatedNormal
 from .mixture import Mixture
 from .priors import make_prior, NormalPrior, MultivariateNormalPrior, HalfNormalPrior
@@ -33,6 +34,7 @@ def _transform_to_less_than(constraint):
 
 
 __all__ = [
+    "Constraint",
     "biject_to",
     "transform_to",
     "TruncatedNormal",

@@ -49,7 +49,7 @@ class QuadPolyMean(Mean):
         for name in ('a', 'b', 'c'):
             name_prior = name + '_prior'
             raw_name = 'raw_' + name
-            if with_default or name_prior in priors:
+            if with_default or 'quadpoly_' + name_prior in priors:
                 prior = priors.get('quadpoly_' + name_prior, getattr(settings, 'quadpoly_' + name).prior())
                 self.register_prior(name_prior, prior, lambda k=name: getattr(self, k),
                                     lambda v, k=name: setattr(self, k, v))

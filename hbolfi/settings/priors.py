@@ -40,7 +40,8 @@ class _prior_context(object):
         cls._prior = cls._prior_registry[name]
 
     @classmethod
-    def set(cls, prior: Optional[Union[str, Prior]] = None, initial_value: Optional[torch.Tensor] = None):
+    def set(cls, prior: Optional[Union[str, Prior]] = None, initial_value: Optional[torch.Tensor] = None,
+            name: Optional[str] = None):
         reload_default = False
         if initial_value is not None:
             cls.initial_value = initial_value
@@ -48,7 +49,11 @@ class _prior_context(object):
         if isinstance(prior, str):
             prior = cls.prior(prior, reload_default=reload_default)
         elif isinstance(prior, Prior):
+            if not cls._prior_registry:
+                cls.default_prior_registry()
             prior.constraint.initial_value = getattr(prior.constraint, 'initial_value', cls.initial_value)
+            if name:
+                cls._prior_registry[name] = prior
         else:
             raise RuntimeError("Invalid prior.")
         if isinstance(prior, DeltaPrior):
@@ -84,13 +89,17 @@ class noise(_prior_context):
     def default_prior_registry(cls):
         super().default_prior_registry()
         if fix_all_hyperparameters.off():
-            default_priors = {'Uniform': make_prior(Uniform(torch.tensor(1e-4), torch.tensor(1e4)),
+            default_priors = {'Uniform': make_prior(Uniform(torch.tensor(1e-4), torch.tensor(1e10)),
                                                     initial_value=cls.initial_value),
-                              'ShiftedHalfNormalPrior': make_prior(ShiftedHalfNormal(torch.tensor(1e-4),
-                                                                                     torch.tensor(1.)),
-                                                                   initial_value=cls.initial_value)}
+                              'ShiftedHalfNormal': make_prior(ShiftedHalfNormal(torch.tensor(1e-5),
+                                                                                torch.tensor(1.)),
+                                                              initial_value=cls.initial_value),
+                              'HalfNormal': HalfNormalPrior(scale=torch.tensor(1.), initial_value=cls.initial_value),
+                              'HalfStudentT': HalfStudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
+                                                                initial_value=cls.initial_value),
+                              }
             cls._prior_registry.update(default_priors)
-            cls._prior = cls._prior_registry['ShiftedHalfNormalPrior']
+            cls._prior = cls._prior_registry['HalfStudentT']
 
 
 # this was found using invgamma_solver, method='normal', l=1/100, u=2
@@ -115,7 +124,7 @@ class lengthscale(_prior_context):
                               'ShiftedInvGamma': make_prior(ShiftedInvGamma(torch.tensor(1e-4), *invgamma_parameters),
                                                             initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
-            cls._prior = cls._prior_registry['ShiftedInvGamma']
+            cls._prior = cls._prior_registry['InvGamma']
 
 
 class outputscale(_prior_context):
@@ -131,12 +140,13 @@ class outputscale(_prior_context):
                                                               initial_value=cls.initial_value),
                               'HalfStudentT': HalfStudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
                                                                 initial_value=cls.initial_value),
-                              'Uniform': make_prior(Uniform(torch.tensor(1e-4), torch.tensor(1e6)),
+                              'Uniform': make_prior(Uniform(torch.tensor(1e-4), torch.tensor(1e12)),
                                                     initial_value=cls.initial_value),
                               'TruncatedNormal': make_prior(TruncatedNormal(0., 1., 1e-4, 1e6),
-                                                            initial_value=cls.initial_value)}
+                                                            initial_value=cls.initial_value),
+                              'HalfNormal': HalfNormalPrior(scale=torch.tensor(1.), initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
-            cls._prior = cls._prior_registry['TruncatedNormal']
+            cls._prior = cls._prior_registry['HalfStudentT']
 
 
 class angular_weights(_prior_context):
@@ -153,7 +163,7 @@ class angular_weights(_prior_context):
                               'HalfStudentT': HalfStudentTPrior(scale=torch.tensor(1.), df=torch.tensor(3.),
                                                                 initial_value=torch.tensor(1.))}
             cls._prior_registry.update(default_priors)
-            cls._prior = cls._prior_registry['Dirichlet']
+            cls._prior = cls._prior_registry['HalfNormal']
 
 
 class alpha(_prior_context):
@@ -255,3 +265,7 @@ class quadpoly_c(_prior_context):
                                                                       initial_value=cls.initial_value)}
             cls._prior_registry.update(default_priors)
             cls._prior = cls._prior_registry['Normal']
+
+
+class dynamically_adjust_quadpoly_c(_feature_flag):
+    _state = True

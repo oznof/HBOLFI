@@ -6,6 +6,7 @@ from .patches import sample_from_prior, _extract_named_priors, _load_raw_paramet
 from .patches import register_constraint, exact_predictive_covar, interval_transform, interval_inverse_transform
 from .patches import gaussian_likelihood_set_priors, gaussian_likelihood_call, exact_mll_forward
 from .property import make_property
+from .misc import normalize
 
 __all__ = [
     "rng",
@@ -24,5 +25,6 @@ __all__ = [
     "gaussian_likelihood_call",
     "exact_mll_forward",
     "psd_safe_cholesky",
-    "make_property"
+    "make_property",
+    "normalize"
 ]

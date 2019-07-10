@@ -193,7 +193,8 @@ def original_prediction_strategy_cylindrical(model, x_pred: torch.Tensor):
         x_train_not0 = x_train[mask_train_not0]
         x_train_0 = x_train[mask_train_0]
         eye_mat = torch.eye(x_train_not0.size(-2))
-        gram_mat = model.kernel(x_train_not0, x_train_not0) + model.likelihood.noise * eye_mat
+        with gpytorch.settings.lazily_evaluate_kernels(False):
+            gram_mat = model.kernel(x_train_not0, x_train_not0) + model.likelihood.noise * eye_mat
         chol_jitter = 0
         while True:
             try:
@@ -209,8 +210,8 @@ def original_prediction_strategy_cylindrical(model, x_pred: torch.Tensor):
     (x_train_not0, x_train_0, L_not0_not0, chol_jitter, y_delta, y_delta_not0, y_delta_0) = model.prediction_strategy
 
     n_pred, dim = x_pred.shape
-    x_pred_radius = torch.sqrt(torch.sum(x_pred ** 2, 1, keepdim=True))
-    assert((x_pred_radius.detach() > 0).all())
+    # x_pred_radius = torch.sqrt(torch.sum(x_pred ** 2, 1, keepdim=True))
+    # assert((x_pred_radius.detach() > 0).all())
 
     if model.to_centered_cube_transform is not None:
         x_pred = model.to_centered_cube_transform(x_pred)
@@ -220,15 +221,11 @@ def original_prediction_strategy_cylindrical(model, x_pred: torch.Tensor):
         K_not0_0 = model.kernel(x1=x_train_not0, xtest=x_pred, ignore_x2=True)
         K_not0_pre = model.kernel(x1=x_train_not0, x2=x_pred)
         K_pre_0 = model.kernel(x1=x_pred, x2=torch.zeros(1, dim))
-    K_pre_pre = model.kernel(x1=x_pred, x2=x_pred)
 
     chol_solver = torch.solve(torch.cat([K_not0_0, K_not0_pre, y_delta_not0[:, None]], 1), L_not0_not0)[0]
     chol_solver_q = chol_solver[:, :n_pred]  # L_10 = L_11^-1 K_10  (n_1 x n_pred), expanding origin to n_pred
     chol_solver_k = chol_solver[:, n_pred:n_pred * 2]  # L_11^-1 K_1*  (n_1 x n_pred)
     chol_solver_y = chol_solver[:, n_pred * 2:n_pred * 2 + 1]  # L_11^-1 y1  (n_1 x 1)
-    # minor detail: chol_jitter should be squared here, but the original implementation didn't have it
-    # also, it is implicitly assumed that there is only one point in the origin
-    # this condition is not checked, nor enforced
     sol_p_sqr = K_0_0 + model.likelihood.noise + chol_jitter - (chol_solver_q ** 2).sum(0).view(-1, 1)
     sol_p = torch.sqrt(sol_p_sqr.clamp(min=1e-12))  # L_00  normally (1 x 1), but expanded to (n_pred, 1)
     # sol_k_bar = K_*0 L_00^-1 + K_*1 L_10^-1
@@ -245,7 +242,14 @@ def original_prediction_strategy_cylindrical(model, x_pred: torch.Tensor):
     pred_mean = model.mean(x_pred) + (torch.mm(chol_solver_k.t(), chol_solver_y) + sol_k_bar * sol_y_bar).squeeze()
     # pred_var = K_pre_pre_diag - ((chol_solver_k ** 2).sum(0).view(-1, 1) + sol_k_bar ** 2).squeeze()
     # K_** - K_*1 L_11^-T L_11 ^-1 K_1* -  (K_*0 L_00^-1 + K_*1 L_10^-1) ( K_*0 L_00^-1 + K_*1 L_10^-1)^T
-    pred_covar = K_pre_pre - chol_solver_k.t().mm(chol_solver_k) - sol_k_bar.mm(sol_k_bar.t())
+    if gpysettings.skip_posterior_variances.on():
+        pred_covar = gpytorch.lazy.ZeroLazyTensor(n_pred, n_pred)
+    else:
+        K_pre_pre = model.kernel(x1=x_pred, x2=x_pred)
+        term2 = -chol_solver_k.t().mm(chol_solver_k) - sol_k_bar.mm(sol_k_bar.t())
+        if gpysettings.lazily_evaluate_kernels.on():
+            term2 = gpytorch.lazify(term2)
+        pred_covar = K_pre_pre + term2
     return gpytorch.distributions.MultivariateNormal(pred_mean, pred_covar)
 
 
@@ -266,14 +270,22 @@ def _original_training_strategy_cylindrical(model, x_train, y_train, save_cache=
     x_train_not0 = x_train[mask_train_not0]
     x_train_0 = x_train[mask_train_0]
     eye_mat = torch.eye(x_train_not0.size(-2))
-    gram_mat = model.kernel(x_train_not0, x_train_not0) + model.likelihood.noise * eye_mat
+    with gpytorch.settings.lazily_evaluate_kernels(False):
+        k_not0_not0 = model.kernel(x_train_not0, x_train_not0)
+    gram_mat = k_not0_not0 + model.likelihood.noise * eye_mat
+    if torch.any(torch.isnan(gram_mat)) or torch.any(torch.diag(k_not0_not0) == 0):
+        r = 0
+        for p in model.kernel.parameters():
+            if p.requires_grad:
+                r = r + 0 * p.sum()
+        return torch.tensor(float('nan')) + r
     chol_jitter = 0
     while True:
         try:
             L_not0_not0 = torch.cholesky(gram_mat + eye_mat * chol_jitter, upper=False)
             break
         except RuntimeError:
-            chol_jitter = gram_mat.data[0, 0] * 1e-6 if chol_jitter == 0 else chol_jitter * 10
+            chol_jitter = max(1e-2, gram_mat.data[0, 0]) * 1e-6 if chol_jitter == 0 else chol_jitter * 10
     y_delta = y_train - model.mean(x_train)
     y_delta_not0 = y_delta[mask_train_not0]
     y_delta_0 = y_delta[mask_train_0]

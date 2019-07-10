@@ -9,7 +9,7 @@ from torch.distributions import StudentT, Uniform, Normal, MultivariateNormal, H
 from pyro.distributions import Delta
 from gpytorch.priors import Prior
 
-
+from .constraint import Constraint
 from .inverse_gamma import InvGamma
 from .half_student_t import HalfStudentT
 from .truncated_normal import TruncatedNormal
@@ -22,27 +22,6 @@ def _bufferize_attributes(module: Module, attributes: Sequence[str]):
         for attr, value in attr_clones.items():
             delattr(module, attr)
             module.register_buffer(attr, value)
-
-
-class Constraint(Module):
-    def __init__(self, support, initial_value=None):
-        super().__init__()
-        self._support = support
-        self._transform = biject_to(support)
-        self._inv_transform = self._transform.inv
-        self.initial_value = initial_value
-
-    def transform(self, tensor):
-        return self._transform(tensor)
-
-    def inverse_transform(self, tensor):
-        return self._inv_transform(tensor)
-
-    def check_raw(self, tensor):
-        return self._support.check(self._transform(tensor)).all()
-
-    def __repr__(self):
-        return self._support.__repr__()
 
 
 class _InitializePrior(object):

@@ -44,13 +44,13 @@ import sampyl
 sampyl.samplers.slice.Slice.step = step
 
 
-def BO(func, ndim, geometry, n_eval=200, ard=False, warping=False, exp_dir='', n_init_eval=20, seed=117,
+def BO(func, ndim, geometry, n_init_eval=20, n_eval=200, ard=False, warping=False, exp_dir='', seed=117,
        fix_sobol=False):
 
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    exp_conf_str = geometry
+    exp_conf_str = f'{n_init_eval}_{seed}_{geometry}'
     if geometry == 'sphere':
         assert (not ard)
         exp_conf_str += '_warping' if warping else ''
@@ -70,14 +70,18 @@ def BO(func, ndim, geometry, n_eval=200, ard=False, warping=False, exp_dir='', n
     if fix_sobol:
         exp_conf_str += '_fix_sobol'
     dir_list = [elm for elm in os.listdir(exp_dir) if os.path.isdir(os.path.join(exp_dir, elm))]
-    folder_name = func.__name__ + '_D' + str(ndim) + '_' + exp_conf_str + '_' + datetime.now().strftime('%Y%m%d-%H:%M:%S:%f')
+    exp_conf_str = func.__name__ + '_D' + str(ndim) + '_' + exp_conf_str
+    folder_name = exp_conf_str + '_' + datetime.now().strftime('%Y%m%d-%H:%M:%S:%f')
     os.makedirs(os.path.join(exp_dir, folder_name))
-    log_filename = os.path.join(exp_dir, folder_name, 'log.csv')
-    model_filename = os.path.join(exp_dir, folder_name, 'model.pt')
-    data_config_filename = os.path.join(exp_dir, folder_name, 'data_config.pkl')
+    log_filename = os.path.join(exp_dir, folder_name, f'log_{exp_conf_str}.csv')
+    model_filename = os.path.join(exp_dir, folder_name, f'model_{exp_conf_str}.pt')
+    data_config_filename = os.path.join(exp_dir, folder_name, f'data_config_{exp_conf_str}.pkl')
     # generate points in [-1, 1]^D, it will include origin as the first point in the set
-    x_input = torch.quasirandom.SobolEngine(ndim).draw(n_init_eval)
-    x_input = x_input * 2 - 1
+    if n_init_eval == 2:  # original implementation
+        x_input = torch.autograd.Variable(torch.stack([torch.zeros(ndim), torch.FloatTensor(ndim).uniform_(-1, 1)]))
+    else:
+        x_input = torch.quasirandom.SobolEngine(ndim).draw(n_init_eval)
+        x_input = x_input * 2 - 1
     output = torch.zeros(n_init_eval, 1)
     for i in range(n_init_eval):
         output[i] = func(x_input[i])
@@ -113,6 +117,9 @@ def BO(func, ndim, geometry, n_eval=200, ard=False, warping=False, exp_dir='', n
         reference = reference.item()
         gp_hyper_params = inference.sampling(n_sample=10, n_burnin=0, n_thin=1)
         inferences = deepcopy_inference(inference, gp_hyper_params)
+        print(gp_hyper_params)
+        import sys
+        sys.exit(1)
 
         x0_cand = optimization_candidates(x_input, output, -1, 1, fix_sobol=fix_sobol)
         x0, sample_info = optimization_init_points(x0_cand, reference=reference, inferences=inferences)
@@ -127,7 +134,7 @@ def BO(func, ndim, geometry, n_eval=200, ard=False, warping=False, exp_dir='', n
         pred_varmax_list.append(pred_varmax.item())
 
         x_input = torch.cat([x_input, next_x_point], 0)
-        output = torch.cat([output, func(x_input[-1]).resize(1, 1)])
+        output = torch.cat([output, func(x_input[-1]).reshape(1, 1)])
 
         min_ind = torch.min(output, 0)[1]
         min_loc = x_input[min_ind]
@@ -136,7 +143,7 @@ def BO(func, ndim, geometry, n_eval=200, ard=False, warping=False, exp_dir='', n
             dist_to_min = (x_input[-1] - min_loc).norm().item()
             out_of_box = torch.sum((torch.abs(x_input[-1]) > 1)).item()
 
-        res_dict = dict(iter=jj+1, time=np.around(time_list[-1], 3),
+        res_dict = dict(iter=jj+1, time=round(time_list[-1], 3),
                         curr_min=min_val, min_ind=min_ind.item(), min_loc_r=min_loc.norm().item(),
                         output=output[-1].item(), input_r=x_input[-1].norm().item(), out_of_box=out_of_box,
                         pred_mean=pred_mean_list[-1], pred_std=pred_std_list[-1],
@@ -171,13 +178,14 @@ if __name__ == '__main__':
     parser.add_argument('--warping', dest='warping', action='store_true', default=True)  # always True
     parser.add_argument('--ard', dest='ard', action='store_true', default=False)
 
-    parser.add_argument('-f', '--func', dest='func_name', default='levy')
+    parser.add_argument('-f', '--func', dest='func_name', default='rosenbrock')
     parser.add_argument('-d', '--dim', dest='ndim', type=int, default=20)
     parser.add_argument('-e', '--n_eval', dest='n_eval', type=int, default=200)
     parser.add_argument('-s', '--seed', dest='seed', type=int, default=117)
+    parser.add_argument('-n', '--n_init', dest='n_init_eval', type=int, default=2)
     parser.add_argument('-fix', '--fix_sobol', dest='fix_sobol', action='store_true', default=False)
 
-    parser.add_argument('--exp_dir', type=str, nargs='?', default="~/storage/Hypersphere/", help="Results dir.")
+    parser.add_argument('--exp_dir', type=str, nargs='?', default="~/storage/Hypersphere/trash", help="Results dir.")
 
     args = parser.parse_args()
 

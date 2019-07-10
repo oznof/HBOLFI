@@ -71,6 +71,7 @@ def _load_raw_parameters(self, **kwargs):
         else:
             delattr(self, name)
             setattr(self, name, val)
+    return self
 
 
 def gaussian_likelihood_set_priors(self, priors=None, with_default=True, without_initial_value=False):

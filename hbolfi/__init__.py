@@ -1,4 +1,4 @@
-from .acquisitions import AcquisitionFunction, AdditiveAcquisitionFunction, LCB, LCBAdd
+from .acquisitions import AcquisitionFunction, AdditiveAcquisitionFunction, LCB, LCBAdd, EI
 from .bayes_opt import BayesianOptimization, BOLFI
 from .distributions import TruncatedNormal, Mixture, make_prior, NormalPrior, MultivariateNormalPrior, DeltaPrior
 from .distributions import GammaPrior, InvGammaPrior, StudentTPrior, HalfStudentTPrior, LogNormalPrior, DirichletPrior
@@ -40,6 +40,7 @@ __all__ = [
     "AdditiveAcquisitionFunction",
     "LCB",
     "LCBAdd",
+    "EI",
     "BayesianOptimization",
     "BOLFI",
     "TruncatedNormal",
