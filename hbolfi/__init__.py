@@ -33,7 +33,7 @@ gpytorch.lazy.lazy_tensor.psd_safe_cholesky = psd_safe_cholesky
 gpytorch.likelihoods.GaussianLikelihood.__call__ = gaussian_likelihood_call
 gpytorch.mlls.ExactMarginalLogLikelihood.forward = exact_mll_forward
 
-__version__ = "0.7"
+__version__ = "0.8"
 
 __all__ = [
     "AcquisitionFunction",

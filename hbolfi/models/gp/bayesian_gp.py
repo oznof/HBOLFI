@@ -16,6 +16,8 @@ from .exact_gp import ExactGPModel
 from .additive_gp import AdditiveStructureGPModel
 from ...inference import nuts
 from ...distributions import Constraint
+from ... import settings
+from ...kernels import CylindricalKernel
 
 
 class BayesianGPModel(GP, SurrogateModel):
@@ -85,19 +87,23 @@ class BayesianGPModel(GP, SurrogateModel):
                            mll: ExactMarginalLogLikelihood,
                            transforms: Optional[Dict[str, Constraint]] = None,
                            load_params: bool = True) -> torch.Tensor:
-        # TODO: Catch exception
-        # try:
-        if load_params:  # if False, it is assumed params have already been loaded
-            model._load_raw_parameters(**params)
-        output = model(model.train_inputs[0])
-        log_joint = mll(output, model.train_targets) * model.train_targets.numel()  # mll returns log_prob / target_size
-        log_joint = log_joint + BayesianGPModel.transform_jacobian(model, params, transforms)
-        return -log_joint
-        # except RuntimeError:  # return `nan` instead of raise Value Error if not be able to get Cholesky
-        #     r = 0
-        #     for p in params.values():
-        #         r = r + 0 * p.sum()
-        #     return torch.tensor(float('nan')) + r
+        try:
+            if load_params:  # if False, it is assumed params have already been loaded
+                model._load_raw_parameters(**params)
+            if settings.out_of_bounds_check.on() and model.out_of_bounds():
+                raise RuntimeError
+            output = model(model.train_inputs[0])
+            # mll returns log_prob / target_size
+            log_joint = mll(output, model.train_targets) * model.train_targets.numel()
+            log_joint = log_joint + BayesianGPModel.transform_jacobian(model, params, transforms)
+            if log_joint != log_joint:  # nan
+                raise RuntimeError
+            return -log_joint
+        except RuntimeError:
+            r = 0
+            for p in params.values():
+                r = r + 0 * p.sum()
+            return torch.tensor(float('inf')) + r
 
     def fit(self, train_inputs: Optional[torch.Tensor] = None,
             train_targets: Optional[torch.Tensor] = None, verbose=False):
@@ -120,15 +126,19 @@ class BayesianGPModel(GP, SurrogateModel):
         elif self.sampler == 'slice':
             param_state = base_sample.param_state
             transforms = {name: base_sample.constraint_for_parameter_name(name) for name in param_state}
+            if isinstance(base_sample.kernel, CylindricalKernel) and \
+                    settings.cylindrical_original_training_strategy.on():
+                transforms['kernel.radial_base_kernel.raw_lengthscale'] = None
+                transforms['kernel.radial_base_kernel.raw_outputscale'] = None
+                # transforms['kernel.raw_alpha'] = None
+                # transforms['kernel.raw_beta'] = None
 
             def logp(param):
                 base_sample.load_array_state(param, param_state)  # modifies the values of param_state
-                logp = -BayesianGPModel.potential_function(param_state, model=base_sample, mll=mll,
+                return -BayesianGPModel.potential_function(param_state, model=base_sample, mll=mll,
                                                            transforms=transforms, load_params=False).item()
-                if logp != logp:
-                    logp = -float('inf')
-                return logp
-            sampler = sampyl.Slice(logp=logp, start={'param': base_sample.state_to_array(param_state)}, compwise=True)
+            sampler = sampyl.Slice(logp=logp, start={'param': base_sample.state_to_array(param_state)}, compwise=True,
+                                   verbose=verbose)
             warmup_steps = self.sampler_options.get('warmup_steps', 100)
             num_thinning = self.sampler_options.get('num_thinning', 10)
             num_samples = self.sampler_options.get('num_samples', 10)

@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Optional
 
 import torch
@@ -12,11 +13,13 @@ from .. import settings
 def make_scaled(cls: Kernel):
     def __init__(self,
                  priors: Optional[Dict[str, Prior]] = None,
+                 set_priors: bool = True,
                  **kwargs):
         cls.__init__(self, **kwargs)
         outputscale = torch.zeros(*self.batch_shape) if len(self.batch_shape) else torch.tensor(0.)
         self.register_parameter(name="raw_outputscale", parameter=torch.nn.Parameter(outputscale))
-        self.set_priors(priors)
+        if priors is not None or set_priors:
+            self.set_priors(priors)
 
     def outputscale_getter(self):
         return self.raw_outputscale_constraint.transform(self.raw_outputscale)
@@ -56,12 +59,17 @@ def make_scaled(cls: Kernel):
         cls.set_priors(self, priors=priors, with_default=with_default, without_initial_value=without_initial_value)
         return self
 
+    def out_of_bounds(self):
+        return cls.out_of_bounds(self) or (self.outputscale < math.exp(-12)).any() or \
+               (self.outputscale > math.exp(20)).any()
+
     def extra_repr(self) -> str:
         return f"lengthscale: {self.lengthscale.detach().numpy()}\n" \
                f"outputscale: {self.outputscale.detach().numpy()}"
 
     methods_to_add = {'__init__': __init__, '_set_outputscale': outputscale_setter,
-                      'forward': forward, 'set_priors': set_priors, 'extra_repr': extra_repr}
+                      'forward': forward, 'set_priors': set_priors, 'out_of_bounds': out_of_bounds,
+                      'extra_repr': extra_repr}
     cls_scaled = type(f"Scale{cls.__name__}", (cls, ), methods_to_add)
     cls_scaled.outputscale = property(outputscale_getter, outputscale_setter)
     return cls_scaled

@@ -2,6 +2,7 @@ import warnings
 import math
 
 import torch
+import torch.distributions
 import gpytorch
 from gpytorch.constraints import Interval
 
@@ -244,11 +245,10 @@ def psd_safe_cholesky(A, upper=False, out=None, jitter=None):
         if jitter is None:
             jitter = 1e-6 if A.dtype == torch.float32 else 1e-8
         jitter_ori = jitter
-        print(A)
         print("===========")
         print(A.diag())
         for i in range(5):
-            print(f"GOING IN jitter={jitter_ori * (10 ** i)}")
+            print(f"Additing jitter={jitter_ori * (10 ** i)}")
             jitter = jitter_ori * (10 ** i)
             Aprime = A.clone()
             Aprime.diagonal(dim1=-2, dim2=-1).add_(jitter)

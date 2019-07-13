@@ -12,6 +12,7 @@ from gpytorch.priors import Prior
 from .constraint import Constraint
 from .inverse_gamma import InvGamma
 from .half_student_t import HalfStudentT
+from .log_student_t import LogStudentT
 from .truncated_normal import TruncatedNormal
 from .mixture import Mixture
 
@@ -56,8 +57,8 @@ def make_prior(cls_or_inst: Union[Type[Distribution], Distribution],
     if isinst:  # create instance
         params = cls_or_inst.__init__.__code__.co_varnames[:cls_or_inst.__init__.__code__.co_argcount]
         params = [p for p in params if p not in ('self', 'validate_args')]
-        # params = [('_'+p if p == 'validate_args' else p) for p in params]
-        cls_or_inst_prior = cls_prior(initial_value=initial_value, **{p: getattr(cls_or_inst, p) for p in params})
+        params_dict = {p: getattr(cls_or_inst, ('base_dist' if p == 'base_distribution' else p)) for p in params}
+        cls_or_inst_prior = cls_prior(initial_value=initial_value, **params_dict)
     else:
         cls_or_inst_prior = cls_prior
     return cls_or_inst_prior
@@ -70,6 +71,7 @@ GammaPrior = make_prior(Gamma)
 InvGammaPrior = make_prior(InvGamma)
 StudentTPrior = make_prior(StudentT)
 HalfStudentTPrior = make_prior(HalfStudentT)
+LogStudentTPrior = make_prior(LogStudentT)
 LogNormalPrior = make_prior(LogNormal)
 DirichletPrior = make_prior(Dirichlet)
 DeltaPrior = make_prior(Delta)

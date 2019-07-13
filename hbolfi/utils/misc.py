@@ -3,7 +3,7 @@ import torch
 
 def normalize(x: torch.Tensor, mode: str = 'moment') -> torch.Tensor:
     x_shape = x.shape
-    if x.ndim == 1:
+    if x.ndim == 1 or (x.ndim == 2 and x_shape[-1] == 1):
         x = x.view(1, -1)
     if mode == 'moment':
         x_norm = x - x.mean(-1, keepdim=True)

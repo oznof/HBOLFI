@@ -3,7 +3,7 @@ import math
 
 import torch
 import torch.nn
-from torch.distributions import Dirichlet
+from torch.distributions import Dirichlet, Uniform
 
 import gpytorch
 from gpytorch.kernels import Kernel
@@ -26,7 +26,7 @@ class CylindricalKernel(Kernel):
     See http://proceedings.mlr.press/v80/oh18a.html for more details
     Args:
         :attr:`radial_base_kernel` (gpytorch.kernels.Kernel, optional):
-            The base kernel for computing the radial kernel.
+            The base kernel for computing the radial kernel (without priors).
             Default: `MaternKernel(nu=5/2, lengthscale_constraint=Interval(max_radius / 100, 2 * max_radius))`
         :attr:`num_angular_weights` (int, optional):
             The number of components in the angular kernel. Default: `4`
@@ -53,7 +53,8 @@ class CylindricalKernel(Kernel):
         self.weight_normalization = weight_normalization
         self.warping = warping
         self.eps = eps
-        self.radial_base_kernel = radial_base_kernel if radial_base_kernel else ScaleMaternKernel(nu=2.5)
+        self.radial_base_kernel = radial_base_kernel if radial_base_kernel else \
+            ScaleMaternKernel(nu=2.5, set_priors=False)
         if priors is None:
             priors = {}
         angular_weights_prior = priors.get('angular_weights_prior', settings.angular_weights.prior())
@@ -154,10 +155,39 @@ class CylindricalKernel(Kernel):
     def num_outputs_per_input(self, x1: torch.Tensor, x2: torch.Tensor) -> int:
         return self.radial_base_kernel.num_outputs_per_input(x1, x2)
 
+    def out_of_bounds(self):
+        if isinstance(self.radial_base_kernel, ScaleMaternKernel):
+            # use original implementation: there is a bug in the computation of the lengthscales
+            # the author parametrizes lengthscale ** 2, but does not take that into account in the
+            # computation of the bounds
+            # we keep the 'feature', taking into account that the bounds need to be adjusted by sqrt,
+            # due to our parametrization
+            lengthscale = self.radial_base_kernel.lengthscale
+            outputscale = self.radial_base_kernel.outputscale
+            radial_out_of_bounds = (lengthscale > math.sqrt(2 * self.max_radius)).any() or \
+                                   (lengthscale < math.exp(-12 / 2)).any() or \
+                                   (outputscale < math.exp(-12)).any() or \
+                                   (outputscale > math.exp(20)).any()
+        else:
+            radial_out_of_bounds = self.radial_base_kernel.out_of_bounds()
+        return radial_out_of_bounds or (self.angular_weights < math.exp(-12)).any() or \
+            (self.angular_weights > math.exp(20)).any() or (self.alpha < 0.5).any() or (self.alpha > 1).any() or \
+            (self.beta < 1).any() or (self.beta > 2).any()
+
     def set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_default=True,
                    without_initial_value=False):
         if priors is None:
             priors = {}
+        if with_default and 'lengthscale_prior' not in priors:
+            if isinstance(settings.cylindrical_lengthscale.prior(), Uniform):
+                # if uniform, update information
+                # check note in out_of_bounds
+                settings.cylindrical_lengthscale.set("Uniform",
+                                                     initial_value=torch.tensor([math.sqrt(2 * self.max_radius) / 2]),
+                                                     lb=math.exp(-12 / 2), ub=math.sqrt(2 * self.max_radius))
+            priors['lengthscale_prior'] = settings.cylindrical_lengthscale.prior()
+        if with_default and 'outputscale_prior' not in priors:
+            priors['outputscale_prior'] = settings.cylindrical_outputscale.prior()
         self.radial_base_kernel.set_priors(priors=priors, with_default=with_default,
                                            without_initial_value=without_initial_value)
         for name in ('angular_weights', 'alpha', 'beta'):
@@ -194,14 +224,15 @@ def original_prediction_strategy_cylindrical(model, x_pred: torch.Tensor):
         x_train_0 = x_train[mask_train_0]
         eye_mat = torch.eye(x_train_not0.size(-2))
         with gpytorch.settings.lazily_evaluate_kernels(False):
-            gram_mat = model.kernel(x_train_not0, x_train_not0) + model.likelihood.noise * eye_mat
+            gram_mat = model.kernel(x_train_not0, x_train_not0) + \
+                       (model.likelihood.noise + 1e-6 * model.kernel.radial_base_kernel.outputscale) * eye_mat
         chol_jitter = 0
         while True:
             try:
                 L_not0_not0 = torch.cholesky(gram_mat + eye_mat * chol_jitter, upper=False)
                 break
             except RuntimeError:
-                chol_jitter = gram_mat.data[0, 0] * 1e-6 if chol_jitter == 0 else chol_jitter * 10
+                chol_jitter = max(1e-2, gram_mat.data[0, 0]) * 1e-6 if chol_jitter == 0 else chol_jitter * 10
         y_delta = model.train_targets - model.mean(x_train)
         y_delta_not0 = y_delta[mask_train_not0]
         y_delta_0 = y_delta[mask_train_0]
@@ -217,7 +248,7 @@ def original_prediction_strategy_cylindrical(model, x_pred: torch.Tensor):
         x_pred = model.to_centered_cube_transform(x_pred)
 
     with gpytorch.settings.lazily_evaluate_kernels(False):
-        K_0_0 = model.kernel(x1=x_train_0, x2=x_train_0)
+        K_0_0 = model.kernel(x1=x_train_0, x2=x_train_0) * (1 + 1e-6)
         K_not0_0 = model.kernel(x1=x_train_not0, xtest=x_pred, ignore_x2=True)
         K_not0_pre = model.kernel(x1=x_train_not0, x2=x_pred)
         K_pre_0 = model.kernel(x1=x_pred, x2=torch.zeros(1, dim))
@@ -272,7 +303,7 @@ def _original_training_strategy_cylindrical(model, x_train, y_train, save_cache=
     eye_mat = torch.eye(x_train_not0.size(-2))
     with gpytorch.settings.lazily_evaluate_kernels(False):
         k_not0_not0 = model.kernel(x_train_not0, x_train_not0)
-    gram_mat = k_not0_not0 + model.likelihood.noise * eye_mat
+    gram_mat = k_not0_not0 + (model.likelihood.noise + 1e-6 * model.kernel.radial_base_kernel.outputscale) * eye_mat
     if torch.any(torch.isnan(gram_mat)) or torch.any(torch.diag(k_not0_not0) == 0):
         r = 0
         for p in model.kernel.parameters():
@@ -292,11 +323,9 @@ def _original_training_strategy_cylindrical(model, x_train, y_train, save_cache=
     if save_cache:
         model.prediction_strategy = (x_train_not0, x_train_0, L_not0_not0, chol_jitter,
                                      y_delta, y_delta_not0, y_delta_0)
-
     with gpytorch.settings.lazily_evaluate_kernels(False):
-        K_0_0 = model.kernel(x1=x_train_0, x2=x_train_0)
+        K_0_0 = model.kernel(x1=x_train_0, x2=x_train_0) * (1 + 1e-6)
         K_not0_0 = model.kernel(x1=x_train_not0, xtest=x_train_not0, ignore_x2=True)
-
     chol_solver = torch.solve(torch.cat([y_delta_not0[:, None], K_not0_0], 1), L_not0_not0)[0]
     chol_solver_y = chol_solver[:, :1]  # L_11^-1 y1  (n_1 x 1)
     chol_solver_q = chol_solver[:, 1:]  # L_10 = L_11^-1 K_10  (n_1 x n_1)

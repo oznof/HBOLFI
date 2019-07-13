@@ -17,8 +17,8 @@ from HyperSphere.feature_map.modules.kumaraswamy import Kumaraswamy
 from HyperSphere.BO.shadow_inference.inference_sphere_origin import ShadowInference as inf_origin
 from HyperSphere.GP.inference.inference import Inference as inf_regular
 from HyperSphere.GP.models.gp_regression import GPRegression
+from HyperSphere.GP.likelihoods.modules.gaussian import GaussianLikelihood
 
-import hbolfi
 from hbolfi import CylindricalKernel, make_gp
 from hbolfi import settings, rng
 from hbolfi.simulators import Levy, Rosenbrock
@@ -109,46 +109,41 @@ def original_negative_log_likelihood(self, hyper=None):
     return nll
 
 
-# inf_origin.negative_log_likelihood = original_negative_log_likelihood
-
-# modified version of Hypersphere sampling where the priors are ignored
-def sampling_no_priors(self, n_sample=10, n_burnin=100, n_thin=10):
+# modified version of Hypersphere sampling where the param vector is permuted so that both implementations match
+def hypersphere_sampling(self, n_sample=10, n_burnin=100, n_thin=10):
     type_as_arg = list(self.model.likelihood.parameters())[0].data
+
+    permute = [-1, -2, 2, 3, 0, 1]
+    inv_permute = [-2, -1, 2, 3, 1, 0]
+
     def logp(hyper):
+        hyper = np.asarray(hyper).reshape(-1)
+        hyper = hyper[inv_permute]
         hyper_tensor = torch.from_numpy(hyper).type_as(type_as_arg)
         if self.model.out_of_bounds(hyper):
             return -np.inf
         self.model.vec_to_param(hyper_tensor)
         if not self.stable_parameters():
             return -np.inf
-        prior = 0  # self.model.prior(hyper)
+        prior = self.model.prior(hyper)
         likelihood = -self.negative_log_likelihood(hyper_tensor).item()
         return prior + likelihood
+
     hyper_numpy = self.model.param_to_vec().numpy()
-    sampler = sampyl.Slice(logp=logp, start={'hyper': hyper_numpy}, compwise=True)
+    hyper_numpy = hyper_numpy[permute]
+    sampler = sampyl.Slice(logp=logp, start={'hyper': hyper_numpy}, compwise=True, verbose=False)
     samples = sampler.sample(n_burnin + n_thin * n_sample, burn=n_burnin + n_thin - 1, thin=n_thin)
-    self.cholesky_update(torch.from_numpy(samples[-1][0]).type_as(type_as_arg))
-    return torch.stack([torch.from_numpy(elm[0]) for elm in samples], 0).type_as(type_as_arg)
-
-
-# modified version of gpytorch.mlls.ExactMarginalLogLikelihood.forward where priors are ignored
-def mll_forward_no_priors(self, output, target, *params):
-    output = self.likelihood(output, *params)
-    res = output.log_prob(target)
-    num_data = target.size(-1)
-    return res.div_(num_data)
-
-
-# modified version of BayesianGPModel.transform_jacobian (no op)
-def transform_jacobian(model, params, transforms):
-    return 0
+    samples = torch.stack([torch.from_numpy(elm[0]) for elm in samples], 0).type_as(type_as_arg)
+    samples = samples[:, inv_permute]
+    self.cholesky_update(samples[-1])
+    return samples
 
 
 class TestCylindricalKernel(unittest.TestCase):
     def setUp(self):
         if hasattr(torch, 'cdist'):
             delattr(torch, 'cdist')
-        torch.set_default_dtype(torch.float32)
+        torch.set_default_dtype(torch.float64)
         gpytorch.settings._fast_covar_root_decomposition._state = False
         gpytorch.settings._fast_log_prob._state = False
         gpytorch.settings._fast_solves._state = False
@@ -180,8 +175,8 @@ class TestCylindricalKernel(unittest.TestCase):
             param_vec = torch.log(torch.cat((outputscale, lengthscale ** 2, angular_weights)))
         k1.vec_to_param(param_vec)
         gram_1 = k1(x1, x2)
-        settings.lengthscale.set("Delta", lengthscale)
-        settings.outputscale.set("Delta", outputscale)
+        settings.cylindrical_lengthscale.set("Delta", lengthscale)
+        settings.cylindrical_outputscale.set("Delta", outputscale)
         settings.angular_weights.set("Delta", angular_weights)
         if warping:
             settings.alpha.set("Delta", alpha)
@@ -191,7 +186,7 @@ class TestCylindricalKernel(unittest.TestCase):
         gram_2 = k2(x1, x2)
         return torch.allclose(gram_1, gram_2)
 
-    def qtest_cylindrical_kernel(self):
+    def test_cylindrical_kernel(self):
         dims = [4, 8, 12, 16, 20]
         outputscales = [torch.tensor([1.17]), torch.tensor([2.13])]
         lengthscales = [torch.tensor([1.17]), torch.tensor([2.13])]
@@ -206,7 +201,7 @@ class TestCylindricalKernel(unittest.TestCase):
                 self.assertTrue(self.check_kernels(dim=dim, outputscale=o, lengthscale=l, angular_weights=w,
                                                    alpha=a, beta=b))
 
-    def qtest_nll_origin(self):
+    def test_nll_origin(self):
         dim = 8
         origin = True
         reps = 10
@@ -239,8 +234,8 @@ class TestCylindricalKernel(unittest.TestCase):
                 inference.cholesky_update(model.param_to_vec())
                 nll1 = inference.negative_log_likelihood()
 
-                settings.outputscale.set('Delta', outputscale)
-                settings.lengthscale.set('Delta', lengthscale)
+                settings.cylindrical_outputscale.set('Delta', outputscale)
+                settings.cylindrical_lengthscale.set('Delta', lengthscale)
                 settings.angular_weights.set('Delta', angular_weights)
                 settings.alpha.set('Delta', alpha)
                 settings.beta.set('Delta', beta)
@@ -273,7 +268,7 @@ class TestCylindricalKernel(unittest.TestCase):
                         self.assertTrue(torch.allclose(nll2, nll2_alt))
                 self.assertTrue(times[1] - times[0] > 0)
 
-    def qtest_predict(self, verbose=False):
+    def test_predict(self, verbose=False):
         dim = 20
         reps = 10
         outputscale = torch.tensor([1.71])
@@ -307,8 +302,8 @@ class TestCylindricalKernel(unittest.TestCase):
                 t1 = time() - s1
                 pred_mean1 = pred_mean1.squeeze()
                 pred_var1 = pred_var1.squeeze()
-                settings.outputscale.set('Delta', outputscale)
-                settings.lengthscale.set('Delta', lengthscale)
+                settings.cylindrical_outputscale.set('Delta', outputscale)
+                settings.cylindrical_lengthscale.set('Delta', lengthscale)
                 settings.angular_weights.set('Delta', angular_weights)
                 settings.alpha.set('Delta', alpha)
                 settings.beta.set('Delta', beta)
@@ -337,6 +332,8 @@ class TestCylindricalKernel(unittest.TestCase):
                 t3 = time() - s3
                 pred_mean3 = pred_mvn3.mean
                 pred_var3 = pred_mvn3.variance
+                print(pred_mean1)
+                print(pred_mean3)
                 self.assertTrue(torch.allclose(pred_mean1, pred_mean3))
                 self.assertTrue(torch.allclose(pred_var1, pred_var3))
                 if verbose:
@@ -350,19 +347,23 @@ class TestCylindricalKernel(unittest.TestCase):
 
     def test_hyper_sampling(self):
         dim = 20
+        n_samples = 20
         f = Rosenbrock(dim)
         search_radius = dim ** 0.5
         x = self.generate_data(dim, search_radius, n=2)
         x[0] = 0.  # include origin in the train set
         y = f.eval(x)
-
         outputscale = torch.std(y).view(-1)
-        lengthscale = torch.tensor([1.])
-        angular_weights = torch.ones(4)
+        lengthscale = torch.tensor([np.sqrt(2 * search_radius) / 2])
+        angular_weights = torch.ones(2)
         noise = outputscale / 1000.
         const = torch.mean(y).view(-1)
 
-        radius_input_map = None  # Kumaraswamy(ndim=1, max_input=search_radius)
+        def noise_prior(self, vec):  # redefine noise prior because unable to recognize the original distribution
+            return torch.distributions.Cauchy(loc=torch.tensor(0.),
+                                              scale=torch.tensor(1.)).log_prob(torch.as_tensor(vec)).sum().item()
+        GaussianLikelihood.prior = noise_prior
+        radius_input_map = None
         max_power = angular_weights.numel() - 1
         k1 = RadializationKernel(max_power=max_power, search_radius=search_radius, radius_input_map=radius_input_map)
         param_vec = torch.log(torch.cat((outputscale, lengthscale ** 2, angular_weights)))
@@ -372,76 +373,46 @@ class TestCylindricalKernel(unittest.TestCase):
         model.mean.const_mean.data = const
         inference = inf_origin((x, y), model)
         inference.cholesky_update(model.param_to_vec())
-        print(model.param_to_vec())
         with rng(torch.Generator().manual_seed(SEED)):
-            # gp_hyper_params = sampling_no_priors(inference, n_sample=10, n_burnin=0, n_thin=1)
-            gp_hyper_params = inference.sampling(n_sample=10, n_burnin=0, n_thin=1)
-
-        # update constraint registry so that the parameters are in the log space
-        @torch.distributions.biject_to.register(torch.distributions.constraints.positive)
-        @torch.distributions.transform_to.register(torch.distributions.constraints.positive)
-        def _transform_to_positive(constraint):
-            return torch.distributions.ExpTransform()
-        # constrained to be positive -> log space
-        settings.outputscale.set("Uniform", outputscale)
-        l_prior = hbolfi.make_prior(torch.distributions.Uniform(torch.tensor(1e-4), torch.tensor(2. * search_radius)),
-                                    initial_value=search_radius)
-        settings.lengthscale.set(l_prior, lengthscale)
-        settings.angular_weights.set("HalfNormal", angular_weights)
-        noise_prior = hbolfi.InvGammaPrior(0.001, 0.001, initial_value=noise)
-        settings.noise.set(noise_prior, noise)
-        #print(settings.noise.prior())
+           gp_hyper_params = hypersphere_sampling(inference, n_sample=n_samples, n_burnin=0, n_thin=1)
+        settings.cylindrical_outputscale.set("Uniform", outputscale)
+        settings.cylindrical_lengthscale.set("Uniform", lengthscale)
+        settings.angular_weights.set("LogNormal", angular_weights)
+        settings.noise.set("LogCauchy", noise)
         # fixed parameters
         settings.quadpoly_a.set('Delta', torch.zeros(1))
         settings.quadpoly_b.set('Delta', torch.zeros(1))
         # real: no constraint
-        settings.quadpoly_c.set("Normal", const)
+        settings.dynamically_adjust_quadpoly_c._set_state(True)
+        settings.quadpoly_c.set("Uniform", const)
         k2 = CylindricalKernel(active_dims=torch.arange(dim),
                                max_radius=search_radius, num_angular_weights=max_power + 1,
                                weight_normalization=True, warping=False)
         model2 = make_gp(k2, bayesian=True, sampler='slice',
-                         sampler_options={'num_samples': 10, 'warmup_steps': 0, 'num_thinning': 1, 'num_chains': 1})
-        #print(noise)
-        #print(model2.likelihood.noise)
-
-        #print(model2.likelihood.noise_covar.noise_prior)
-        #print(settings.noise.prior())
-        #import sys
-        #sys.exit(1)
+                         sampler_options={'num_samples': n_samples, 'warmup_steps': 0,
+                                          'num_thinning': 1, 'num_chains': 1})
         y = y.squeeze()
         model2.set_train_data(inputs=x, targets=y, strict=False)
-        orig_transform_jacobian = model2.transform_jacobian
-        orig_exactmll_forward = gpytorch.mlls.ExactMarginalLogLikelihood.forward
-        # model2.transform_jacobian = transform_jacobian
-        # gpytorch.mlls.ExactMarginalLogLikelihood.forward = mll_forward_no_priors
         settings.initialize_before_fitting._state = False
+        settings.out_of_bounds_check._state = True
         with rng(torch.Generator().manual_seed(SEED)):
             model2.fit()
-        # revert changes
-        model2.transform_jacobian = orig_transform_jacobian
-        gpytorch.mlls.ExactMarginalLogLikelihood.forward = orig_exactmll_forward
-        print("OUTPUTSCALE")
-        print(gp_hyper_params[:, 0].exp())
-        a = torch.cat([sample.kernel.radial_base_kernel.outputscale.data.view(-1) for sample in model2.samples])
-        print(a)
-        print("LENGTHSCALE")
-        print(gp_hyper_params[:, 1].exp().sqrt())
-        a = torch.cat([sample.kernel.radial_base_kernel.lengthscale.data.view(-1) for sample in model2.samples])
-        print(a)
-        print("ANGULAR WEIGHTS")
-        print(gp_hyper_params[:, 2:6].exp())
-        a = torch.stack([sample.kernel.angular_weights.data.view(-1) for sample in model2.samples])
-        print(a)
-        print("CONST")
-        print(gp_hyper_params[:, 6])
-        a = torch.cat([sample.mean.c.data.view(-1) for sample in model2.samples])
-        print(a)
-        print("NOISE")
-        print(gp_hyper_params[:, 7].exp())
-        a = torch.cat([sample.likelihood.noise.data.view(-1) for sample in model2.samples])
-        print(a)
-        print("========")
-        print(model.likelihood.log_noise_var.exp())
+        i = 0
+        outputscales = torch.cat([sample.kernel.radial_base_kernel.outputscale.data.view(-1)
+                                  for sample in model2.samples])
+        self.assertTrue(torch.allclose(gp_hyper_params[:, i].exp(), outputscales))
+        i += 1
+        lengthscales = torch.cat([sample.kernel.radial_base_kernel.lengthscale.data.view(-1)
+                                  for sample in model2.samples])
+        self.assertTrue(torch.allclose(gp_hyper_params[:, i].exp().sqrt(), lengthscales))
+        i += 1
+        angular_ws = torch.stack([sample.kernel.angular_weights.data.view(-1) for sample in model2.samples])
+        self.assertTrue(torch.allclose(gp_hyper_params[:, i:i+angular_weights.numel()].exp(), angular_ws))
+        constants = torch.cat([sample.mean.c.data.view(-1) for sample in model2.samples])
+        self.assertTrue(torch.allclose(gp_hyper_params[:, -2], constants))
+        noises = torch.cat([sample.likelihood.noise.data.view(-1) for sample in model2.samples])
+        self.assertTrue(torch.allclose(gp_hyper_params[:, -1].exp().view(-1), noises))
+
 
 if __name__ == '__main__':
     unittest.main()

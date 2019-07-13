@@ -1,3 +1,4 @@
+import math
 from typing import Dict, Optional
 
 import torch
@@ -21,6 +22,10 @@ def kernel_set_priors(self, priors: Optional[Dict[str, Prior]] = None, with_defa
         if without_initial_value:
             prior.constraint.initial_value = init_value
     return self
+
+
+def kernel_out_of_bounds(self):
+    return (self.lengthscale < math.exp(-12)).any() or (self.lengthscale > math.exp(20)).any()
 
 
 # gpytorch.kernels.AdditiveKernel does not initialize properly

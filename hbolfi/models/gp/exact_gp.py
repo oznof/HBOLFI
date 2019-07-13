@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
-import time
-from typing import Any, Dict, Tuple, Optional
 from collections import OrderedDict
 import copy
+import math
+import time
+from typing import Any, Dict, Tuple, Optional
 
 import numpy as np
 import scipy
 import scipy.optimize
 
 import torch
-from torch.distributions import Transform
+from torch.distributions import constraints, transforms, Normal, Uniform, Transform
 import gpytorch
 from gpytorch.models import ExactGP
 from gpytorch.means import Mean
@@ -23,10 +24,10 @@ from pyro.distributions import Delta
 from ..surrogate_model import SurrogateModel
 from ... import settings
 from ...means import QuadPolyMean
-# TODO: REMOVE THIS
+# TODO: remove ScaleRBF import
 from ...kernels import ScaleRBFKernel, CylindricalKernel
 from ...kernels.cylindrical import original_prediction_strategy_cylindrical, original_training_strategy_cylindrical
-from ...distributions import NormalPrior
+from ...distributions import NormalPrior, make_prior
 
 
 class ExactGPModel(ExactGP, SurrogateModel):
@@ -124,17 +125,28 @@ class ExactGPModel(ExactGP, SurrogateModel):
         return MultivariateNormal(mean_x, covar_x)
 
     def load_init(self):
-        if settings.dynamically_adjust_quadpoly_c.on() and \
-           isinstance(self.mean, QuadPolyMean) and isinstance(self.mean.c_prior, torch.distributions.Normal):
+        if settings.dynamically_adjust_quadpoly_c.on() and isinstance(self.mean, QuadPolyMean):
             c_mean = self.train_targets.mean()
-            c_std = max((self.train_targets.max() - c_mean).item(), (c_mean - self.train_targets.min()).item()) / 3.
-            quadpoly_c_prior = NormalPrior(loc=c_mean, scale=c_std, initial_value=c_mean)
-            # set it globally so that it can be broadcast to new objects
-            settings.quadpoly_c.set(quadpoly_c_prior, c_mean)
-            # set it locally, without changing other parameters of the mean
-            self.mean.set_priors({'quadpoly_c_prior': quadpoly_c_prior}, with_default=False)
-            # NOTE: its value might be set again on the following block, but it'll be from the new distribution
-            #       no need to add extra checks for now
+            if isinstance(self.mean.c_prior, Normal):
+                c_std = max((self.train_targets.max() - c_mean).item(), (c_mean - self.train_targets.min()).item()) / 3.
+                quadpoly_c_prior = NormalPrior(loc=c_mean, scale=c_std, initial_value=c_mean)
+                # set it globally so that it can be broadcast to new objects
+                settings.quadpoly_c.set(quadpoly_c_prior, c_mean)
+                # set it locally, without changing other parameters of the mean
+                self.mean.set_priors({'quadpoly_c_prior': quadpoly_c_prior}, with_default=False)
+                # NOTE: its value might be set again on the following block, but it'll be from the new distribution
+                #       no need to add extra checks for now
+            elif isinstance(self.mean.c_prior, Uniform):
+                quadpoly_c_prior = make_prior(Uniform(low=self.train_targets.min(), high=self.train_targets.max()),
+                                              initial_value=c_mean)
+                if isinstance(self.kernel, CylindricalKernel) and settings.cylindrical_original_training_strategy.on():
+                    # original implementation does not use any transformation (e.g. sigmoid)
+                    quadpoly_c_prior._support = constraints._Real
+                    quadpoly_c_prior.constraint._transform = transforms.identity_transform
+                    quadpoly_c_prior.constraint._inv_transform = transforms.identity_transform
+                settings.quadpoly_c.set(quadpoly_c_prior, c_mean)
+                self.mean.set_priors({'quadpoly_c_prior': quadpoly_c_prior}, with_default=False)
+
         if settings.initialize_before_fitting.on():
             if settings.initialize_by_sampling.on():
                 # explicitly iterating over these submodules allows to define other submodules for which
@@ -150,7 +162,6 @@ class ExactGPModel(ExactGP, SurrogateModel):
 
     @property
     def param_state(self):
-        # TODO: check that it is fetching noise param
         # (raw) unconstrained parameters
         param_state = OrderedDict()
         for name, prior, _, _ in self.named_priors():
@@ -249,17 +260,33 @@ class ExactGPModel(ExactGP, SurrogateModel):
     def state_to_array(self, state: Optional[OrderedDict] = None, grad: bool = False):
         if state is None:
             state = self.param_state
-        if not grad:
-            return np.concatenate([v.detach().clone().view(-1).cpu().double().numpy() for v in state.values()])
-        return np.concatenate([v.grad.detach().clone().view(-1).cpu().double().numpy() for v in state.values()])
+        ock = isinstance(self.kernel, CylindricalKernel) and settings.cylindrical_original_training_strategy.on()
+        # if not grad:
+        #     return np.concatenate([v.detach().clone().view(-1).cpu().double().numpy() for v in state.values()])
+        # return np.concatenate([v.grad.detach().clone().view(-1).cpu().double().numpy() for v in state.values()])
+        arr = []
+        for name, val in state.items():
+            v = val if not grad else val.grad
+            v = v.detach().clone().view(-1).cpu().double().numpy()
+            if ock and 'radial_base_kernel.raw_lengthscale' in name:
+                # need to set log lengthscale -> 2 log lengthscale
+                # NOTE: param state remains unchanged. this change will only be visible to the numpy backend
+                #       e.g. optimizing using scipy LBFGS / sampling using sampyl slice
+                # TODO: the additive case is not being addressed, need to override this function
+                v = 2 * v if not grad else v / 2
+            arr.append(v)
+        return np.concatenate(arr)
 
     def load_array_state(self, array: np.ndarray, state: Optional[OrderedDict] = None):
         if state is None:
             state = self.param_state
         with torch.no_grad():
             i = 0
+            ock = isinstance(self.kernel, CylindricalKernel) and settings.cylindrical_original_training_strategy.on()
+            array = array.reshape(-1)
             for p, v in state.items():
-                v.copy_(torch.tensor(array[i:i+v.numel()]).view(v.shape))
+                val = torch.tensor(array[i:i+v.numel()]).view(v.shape)
+                v.copy_(val / 2 if ock and 'radial_base_kernel.raw_lengthscale' in p else val)
                 i += v.numel()
         return self
 
@@ -281,6 +308,10 @@ class ExactGPModel(ExactGP, SurrogateModel):
             model.kernel.set_priors(model.priors, without_initial_value=True)
             model.mean.set_priors(model.priors, without_initial_value=True)
         return model
+
+    def out_of_bounds(self):
+        noise = self.likelihood.noise
+        return self.kernel.out_of_bounds() or (noise < math.exp(-12)).any() or (noise > math.exp(16)).any()
 
     def clone(self):
         # some attributes are not deep copied and

@@ -1,6 +1,7 @@
 from .priors import default_prior_names
-from .priors import fix_all_hyperparameters, noise, lengthscale, outputscale
-from .priors import angular_weights, alpha, beta
+from .priors import fix_all_hyperparameters, noise, lengthscale, cylindrical_lengthscale
+from .priors import outputscale, cylindrical_outputscale
+from .priors import angular_weights, alpha, beta, out_of_bounds_check
 from .priors import quadpoly_a, quadpoly_b, quadpoly_c, dynamically_adjust_quadpoly_c
 from .optim import initialize_before_fitting, initialize_by_sampling
 from .optim import default_optimizer, torch_optimizers, default_torch_optimizer_options
@@ -17,7 +18,9 @@ __all__ = [
     "fix_all_hyperparameters",
     "noise",
     "lengthscale",
+    "cylindrical_lengthscale",
     "outputscale",
+    "cylindrical_outputscale",
     "angular_weights",
     "alpha",
     "beta",
@@ -25,6 +28,7 @@ __all__ = [
     "quadpoly_b",
     "quadpoly_c",
     "dynamically_adjust_quadpoly_c",
+    "out_of_bounds_check",
     # OPTIMIZATION
     # context managers
     "initialize_before_fitting",
