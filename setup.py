@@ -34,7 +34,7 @@ setup(
               'hbolfi.acquisitions', 'hbolfi.distributions', 'hbolfi.kernel_discovery',
               'hbolfi.kernel_discovery.additive'],
     url='',
-    license='',
+    license='MIT',
     author='Afonso Eduardo',
     author_email='afonso.eduardo@ed.ac.uk',
     description='High-dimensional Bayesian Optimization for Likelihood-Free Inference',
